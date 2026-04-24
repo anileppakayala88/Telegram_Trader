@@ -65,7 +65,7 @@ Journal    Signal Object
 - **Language:** Python 3.11+
 - **Telegram:** Telethon (user account MTProto API)
 - **Auth:** Session file (`session_fetch.session`) — created once via `auth.py`
-- **Parsing:** Regex fast path + Claude API (claude-haiku) fallback for ambiguous messages
+- **Parsing:** Regex only for Phase 1 — Claude API (claude-haiku) fallback to be added once API key is available (TODO)
 - **Journal:** Append-only JSONL file (`journal/trades.jsonl`) + human-readable markdown summary
 - **Webhooks:** `httpx` (async HTTP client)
 - **Config:** `python-dotenv` for credentials
@@ -258,7 +258,6 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 - Multi-account Telegram support
 - Risk management / position sizing
 - Broker integration beyond TradingView webhooks
-- Online journal hosting (Google Sheets or similar) — add after Phase 1 logic is working
 
 ---
 
@@ -334,3 +333,8 @@ Linking strategy:
 
 - [ ] TradingView webhook URL format — confirm when Phase 2 begins
 - [ ] More channels to be added later — onboard using the same channel onboarding process defined above
+
+## TODO (deferred)
+
+- [ ] Add Claude API (claude-haiku) fallback parser once Anthropic API key is available
+- [ ] Online journal hosting (Google Sheets) — after Phase 1 logic is working
