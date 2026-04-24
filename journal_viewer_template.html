@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Trade Journal</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh}
+header{background:#161b22;border-bottom:1px solid #21262d;padding:14px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+h1{font-size:1.1rem;font-weight:600;color:#e6edf3}
+.pill{font-size:.72rem;padding:2px 9px;border-radius:20px;background:#21262d;color:#8b949e;font-weight:600}
+.summary{display:flex;gap:0;background:#161b22;border-bottom:2px solid #21262d;overflow-x:auto}
+.stat{display:flex;flex-direction:column;align-items:center;padding:10px 22px;gap:2px;border-right:1px solid #21262d}
+.stat:last-child{border-right:none}
+.stat-val{font-size:1.4rem;font-weight:700}
+.stat-lbl{font-size:.62rem;color:#6e7681;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+.controls{background:#0d1117;border-bottom:1px solid #21262d;padding:9px 20px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+select,input[type=text]{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:5px 9px;border-radius:6px;font-size:.78rem;outline:none}
+select:focus,input:focus{border-color:#388bfd}
+.ctrl-lbl{font-size:.7rem;color:#6e7681}
+.ctrl-g{display:flex;align-items:center;gap:5px}
+#count{margin-left:auto;font-size:.73rem;color:#6e7681}
+.wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:.78rem}
+thead th{background:#161b22;color:#6e7681;font-weight:500;font-size:.67rem;text-transform:uppercase;letter-spacing:.06em;padding:8px 11px;text-align:left;border-bottom:2px solid #21262d;white-space:nowrap;position:sticky;top:0;z-index:2}
+tbody td{padding:7px 11px;border-bottom:1px solid #161b22;vertical-align:top}
+tbody tr:hover td{background:#161b22}
+.gs td{border-top:2px solid #21262d}
+.b{display:inline-block;padding:1px 7px;border-radius:4px;font-size:.67rem;font-weight:700;white-space:nowrap}
+.b-sig{background:#12261e;color:#3fb950;border:1px solid #238636}
+.b-upd{background:#0d1f3c;color:#388bfd;border:1px solid #1f6feb}
+.b-BUY{background:#12261e;color:#3fb950}
+.b-SELL{background:#2d1117;color:#f85149}
+.b-parsed{background:#12261e;color:#3fb950}
+.b-partial{background:#2d2208;color:#e3b341}
+.b-failed{background:#2d1117;color:#f85149}
+.u-tp_hit{color:#3fb950;font-weight:600}
+.u-full_close{color:#3fb950;font-weight:600}
+.u-sl_hit{color:#f85149;font-weight:600}
+.u-cancelled{color:#e3b341;font-weight:600}
+.u-breakeven{color:#58a6ff;font-weight:600}
+.u-partial_close{color:#a371f7;font-weight:600}
+.u-commentary{color:#6e7681}
+.ch-t{color:#a371f7;font-size:.71rem}
+.ch-x{color:#e3b341;font-size:.71rem}
+.ts{color:#6e7681;font-size:.71rem;white-space:nowrap}
+.mono{font-family:monospace;font-size:.76rem}
+.tp-c{font-family:monospace;font-size:.72rem;color:#8b949e}
+.raw{max-width:230px;white-space:pre-wrap;word-break:break-word;color:#8b949e;font-family:monospace;font-size:.69rem;line-height:1.4}
+.sid{font-family:monospace;font-size:.64rem;color:#444;cursor:default}
+.dim{color:#333}
+</style>
+</head>
+<body>
+<header>
+  <h1>Trade Journal</h1>
+  <span class="pill" id="hdr-total"></span>
+  <span style="font-size:.75rem;color:#6e7681">Vip Thrilokh + XAUUSD VIP BIG LOTS</span>
+</header>
+<div class="summary" id="summary"></div>
+<div class="controls">
+  <div class="ctrl-g"><span class="ctrl-lbl">Channel</span>
+    <select id="f-ch">
+      <option value="">All</option>
+      <option value="Vip Thrilokh">Vip Thrilokh</option>
+      <option value="XAUUSD VIP BIG LOTS">XAU Big Lots</option>
+    </select></div>
+  <div class="ctrl-g"><span class="ctrl-lbl">Type</span>
+    <select id="f-type">
+      <option value="">All</option>
+      <option value="new_signal">Signal</option>
+      <option value="trade_update">Update</option>
+    </select></div>
+  <div class="ctrl-g"><span class="ctrl-lbl">Direction</span>
+    <select id="f-dir">
+      <option value="">Any</option>
+      <option value="BUY">BUY</option>
+      <option value="SELL">SELL</option>
+    </select></div>
+  <div class="ctrl-g"><span class="ctrl-lbl">Update type</span>
+    <select id="f-upd">
+      <option value="">Any</option>
+      <option value="tp_hit">tp_hit</option>
+      <option value="full_close">full_close</option>
+      <option value="sl_hit">sl_hit</option>
+      <option value="cancelled">cancelled</option>
+      <option value="breakeven">breakeven</option>
+      <option value="partial_close">partial_close</option>
+      <option value="commentary">commentary</option>
+    </select></div>
+  <div class="ctrl-g"><span class="ctrl-lbl">Instrument</span>
+    <input type="text" id="f-inst" placeholder="XAUUSD…" style="width:90px"></div>
+  <span id="count"></span>
+</div>
+<div class="wrap">
+<table>
+  <thead><tr>
+    <th>#</th><th>Time (UTC)</th><th>Channel</th><th>Type</th>
+    <th>Instrument</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP(s)</th>
+    <th>Order</th><th>Status / Update</th><th>Signal ID</th><th>Raw message</th>
+  </tr></thead>
+  <tbody id="tbody"></tbody>
+</table>
+</div>
+<script>
+const DATA = __DATA_PLACEHOLDER__;
+const rows = DATA.sort((a,b)=>a.timestamp<b.timestamp?-1:1);
+
+const n=t=>rows.filter(r=>r.update_type===t).length;
+const nSig=rows.filter(r=>r.message_type==='new_signal').length;
+const nUpd=rows.filter(r=>r.message_type==='trade_update').length;
+document.getElementById('hdr-total').textContent=rows.length+' entries';
+const stats=[
+  ['Signals',nSig,'#3fb950'],['Updates',nUpd,'#388bfd'],
+  ['TP Hits',n('tp_hit'),'#3fb950'],['Full Close',n('full_close'),'#3fb950'],
+  ['SL Hits',n('sl_hit'),'#f85149'],['Cancelled',n('cancelled'),'#e3b341'],
+  ['Breakeven',n('breakeven'),'#58a6ff'],['Partial',n('partial_close'),'#a371f7'],
+];
+document.getElementById('summary').innerHTML=stats.map(([l,v,c])=>
+  `<div class="stat"><div class="stat-val" style="color:${c}">${v}</div><div class="stat-lbl">${l}</div></div>`
+).join('');
+
+['f-ch','f-type','f-dir','f-upd','f-inst'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+function render(){
+  const fCh=document.getElementById('f-ch').value;
+  const fTy=document.getElementById('f-type').value;
+  const fDir=document.getElementById('f-dir').value;
+  const fUp=document.getElementById('f-upd').value;
+  const fIn=document.getElementById('f-inst').value.toUpperCase();
+  const filtered=rows.filter(r=>{
+    if(fCh&&r.source_channel_name!==fCh)return false;
+    if(fTy&&r.message_type!==fTy)return false;
+    if(fDir&&r.direction!==fDir)return false;
+    if(fUp&&r.update_type!==fUp)return false;
+    if(fIn&&!(r.instrument||'').includes(fIn))return false;
+    return true;
+  });
+  document.getElementById('count').textContent=filtered.length+' of '+rows.length;
+  const tbody=document.getElementById('tbody');
+  tbody.innerHTML='';
+  let prevSid=undefined;
+  filtered.forEach((r,i)=>{
+    const isSig=r.message_type==='new_signal';
+    const tr=document.createElement('tr');
+    if(r.signal_id!==prevSid)tr.className='gs';
+    prevSid=r.signal_id;
+    const ts=r.timestamp.replace('T',' ').replace(/\+.*/,'').slice(0,16);
+    const chC=r.source_channel_name==='Vip Thrilokh'?'ch-t':'ch-x';
+    const chL=r.source_channel_name==='Vip Thrilokh'?'Vip Thrilokh':'XAU Big Lots';
+    const tp=Array.isArray(r.tp)&&r.tp.length?r.tp.join(' › '):'—';
+    const range=r.entry_range?`<br><span style="color:#444;font-size:.64rem">${r.entry_range[0]}–${r.entry_range[1]}</span>`:'';
+    const status=isSig
+      ?`<span class="b b-${r.parse_status}">${r.parse_status}</span>`
+      :`<span class="u-${r.update_type||'commentary'}">${r.update_type||'—'}</span>`;
+    const sid=r.signal_id
+      ?`<span class="sid" title="${r.signal_id}">${r.signal_id.slice(0,8)}…</span>`
+      :`<span class="dim">unlinked</span>`;
+    tr.innerHTML=`
+      <td style="color:#555;font-size:.69rem">${i+1}</td>
+      <td class="ts">${ts}</td>
+      <td><span class="${chC}">${chL}</span></td>
+      <td>${isSig?'<span class="b b-sig">signal</span>':'<span class="b b-upd">update</span>'}</td>
+      <td style="font-weight:${isSig?600:400};color:${isSig?'#e6edf3':'#8b949e'}">${r.instrument||'<span class="dim">—</span>'}</td>
+      <td>${r.direction?`<span class="b b-${r.direction}">${r.direction}</span>`:'<span class="dim">—</span>'}</td>
+      <td class="mono">${r.entry!=null?r.entry:'—'}${range}</td>
+      <td class="mono">${r.sl!=null?r.sl:'—'}</td>
+      <td class="tp-c">${tp}</td>
+      <td style="color:#6e7681;font-size:.71rem">${r.order_type||'—'}</td>
+      <td>${status}</td>
+      <td>${sid}</td>
+      <td><div class="raw">${esc(r.raw_message)}</div></td>`;
+    tbody.appendChild(tr);
+  });
+}
+render();
+</script>
+</body>
+</html>

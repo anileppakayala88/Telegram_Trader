@@ -37,14 +37,15 @@ _ASSET_CLASS = {
 #   "Sell Usdchf  0.78436\nSl 0.78641\nTp @ 0.77928"
 _SIGNAL_RE = re.compile(
     r"^(?:(buy|sell)[ \t]+)?(\w+)[ \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
-    r"[ \t]*sl[. ]*@?[ \t]*([\d.]+)[ \t]*\r?\n"
-    r"[ \t]*tp[. ]*@?[ \t]*([\d.]+)",
+    r"[ \t]*sl\d*[. \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
+    r"[ \t]*tp\d*[. \t]+@?[ \t]*([\d.]+)",
     re.IGNORECASE | re.MULTILINE,
 )
 
 # Ordered by severity — first match wins
 _UPDATE_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\bclosing\s+this\b|\bclose\s+here\b", re.I),       "full_close"),
+    (re.compile(r"\ball\s+tp\s+hit|all\s+tp\s+hitted",   re.I),       "full_close"),
+    (re.compile(r"\bclosing\s+this\b|\bclose\s+(here|full)\b", re.I), "full_close"),
     (re.compile(r"\bclose\s+partials?\b",                 re.I),       "partial_close"),
     (re.compile(r"\bsl\s+(as\s+)?be\b|\bset\s+be\b",     re.I),       "breakeven"),
     (re.compile(r"\btapped\b",                            re.I),       "tp_hit"),
