@@ -272,15 +272,18 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 
 ### Trade Linking (update → original signal)
 
-Trade update messages must be linked back to the original signal they belong to. Linking strategy:
+Trade update messages are sent as **Telegram replies** to the original signal message. This means Telethon gives us `message.reply_to_msg_id` — the exact Telegram message ID of the original signal.
 
-- When a `new_signal` is parsed, it is assigned a `signal_id` (UUID) and stored as the **open trade** for that instrument on that channel
-- When a `trade_update` arrives, the parser looks up the most recent open signal for the mentioned instrument on the same channel and stamps the update with that `signal_id`
-- Updates are written as separate JSONL entries with `message_type: trade_update` and a `signal_id` reference
+Linking strategy:
+- When a `new_signal` is parsed, store its Telegram `message_id` alongside the `signal_id` in the journal and in memory
+- When a `trade_update` arrives, check `message.reply_to_msg_id`:
+  - If set → look up the matching `signal_id` from the in-memory map (`telegram_msg_id → signal_id`)
+  - If not set → fall back to most recent open signal on that channel (safety net only)
+- Updates are written as separate JSONL entries with `message_type: trade_update` and the resolved `signal_id`
 - A signal is considered **closed** when any of these update messages arrive:
   - Channel 1: `"Am closing..."`, `"close partials"` (full close implied)
   - Channel 2: `"ALL TP HIT"`, `"Be hit"`, `"Missed close it"`, `"Just missed our limit"`
-- Open trade state is held **in memory** while the listener runs; on restart it is rebuilt by replaying the journal
+- On restart, the in-memory `telegram_msg_id → signal_id` map is rebuilt by replaying the journal
 
 ### Journal Entry Schema
 
@@ -288,6 +291,7 @@ Trade update messages must be linked back to the original signal they belong to.
 ```json
 {
   "signal_id": "uuid",
+  "telegram_msg_id": 12345,
   "message_type": "new_signal",
   "timestamp": "ISO8601",
   "source_channel_id": 2133117224,
@@ -311,6 +315,8 @@ Trade update messages must be linked back to the original signal they belong to.
 ```json
 {
   "signal_id": "uuid-of-original-signal",
+  "telegram_msg_id": 12346,
+  "telegram_reply_to_msg_id": 12345,
   "message_type": "trade_update",
   "timestamp": "ISO8601",
   "source_channel_id": 2133117224,
