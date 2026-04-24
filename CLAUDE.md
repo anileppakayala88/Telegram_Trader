@@ -10,7 +10,7 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
 
 ### Phase 1 — Signal Reader + Journal (current)
 - Connect to Telegram as a user account (Telethon)
-- Listen to a specific channel/group for new messages
+- Listen to multiple channels simultaneously for new messages
 - Parse each message into a structured trade signal:
   - Instrument (e.g. XAUUSD, EURUSD, NAS100, BTC/USD)
   - Direction (BUY / SELL)
@@ -18,6 +18,7 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
   - Take Profit levels (TP1, TP2, TP3 — variable)
   - Stop Loss
   - Asset class (forex / indices / crypto / futures)
+- Classify message type: new signal, trade update, or noise
 - Handle optional images attached to messages
 - Write parsed signal to a trade journal (human-readable log)
 - Flag unparseable messages for manual review
@@ -37,17 +38,22 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
 ## Architecture
 
 ```
-Telegram (channel/group)
+Telegram (multiple channels)
         |
    Telethon Listener
         |
-   Message Parser
-   (LLM-assisted or regex — handles messy/informal signal text)
+   Channel Router (identifies source channel)
+        |
+   Channel-Specific Parser
+   (per-channel profile — regex fast path + LLM fallback)
+        |
+   Message Classifier
+   (new signal | trade update | noise)
         |
    ┌────┴────┐
    │         │
 Journal    Signal Object
-(log file) (structured dict)
+(JSONL)    (structured dict)
                 |
          [Phase 2] TradingView Webhook
 ```
@@ -58,7 +64,8 @@ Journal    Signal Object
 
 - **Language:** Python 3.11+
 - **Telegram:** Telethon (user account MTProto API)
-- **Parsing:** Claude API (claude-haiku for speed/cost) + regex fallback
+- **Auth:** Session file (`session_fetch.session`) — created once via `auth.py`
+- **Parsing:** Regex fast path + Claude API (claude-haiku) fallback for ambiguous messages
 - **Journal:** Append-only JSONL file (`journal/trades.jsonl`) + human-readable markdown summary
 - **Webhooks:** `httpx` (async HTTP client)
 - **Config:** `python-dotenv` for credentials
@@ -69,17 +76,129 @@ Journal    Signal Object
 
 ```
 Telegram_Trader/
-├── .env                   # credentials (never committed)
+├── .env                    # credentials (never committed)
 ├── CLAUDE.md
 ├── requirements.txt
-├── main.py                # entry point — starts listener
-├── listener.py            # Telethon event handler
-├── parser.py              # signal parsing logic
-├── journal.py             # write to trade journal
-├── webhook.py             # TradingView webhook sender (Phase 2)
+├── auth.py                 # one-time Telegram session auth
+├── fetch_samples.py        # pull historical messages for analysis
+├── list_channels.py        # list all channels the account is in
+├── main.py                 # entry point — starts listener
+├── listener.py             # Telethon event handler
+├── parser.py               # signal parsing logic (channel-aware)
+├── journal.py              # write to trade journal
+├── webhook.py              # TradingView webhook sender (Phase 2)
+├── channels/
+│   ├── vip_thrilokh.py     # parser profile for channel 1
+│   └── xauusd_big_lots.py  # parser profile for channel 2
 └── journal/
-    └── trades.jsonl       # append-only signal log
+    └── trades.jsonl        # append-only signal log
 ```
+
+---
+
+## Telegram Access
+
+- **Method:** Telethon user account (MTProto API) — not a bot
+- **Credentials:** stored in `.env` (never committed)
+- **Session file:** `session_fetch.session` — created by running `auth.py` once; reused on all subsequent runs
+- **Account phone:** Canadian number (+1 416 528 7743)
+
+### Active Channels
+
+| Channel Name         | Telegram ID  | Username     | Asset Focus                        |
+|----------------------|--------------|------------- |------------------------------------|
+| Vip Thrilokh         | 2133117224   | no-username  | Multi-asset (BTC, Forex, NQ)       |
+| XAUUSD VIP BIG LOTS  | 1481325093   | no-username  | XAUUSD only                        |
+
+Access channels by **numeric ID** (no username available for either).
+
+---
+
+## Channel Profiles
+
+### Channel 1 — Vip Thrilokh (ID: 2133117224)
+
+**Signal format:** Minimal, 3-line, no direction keyword. Direction inferred from SL position.
+
+```
+Btc @ 74220
+Sl  @ 75647        ← SL > Entry = SELL
+Tp. @ 70450
+```
+
+**Direction inference rule:**
+- `SL > Entry` → SELL
+- `SL < Entry` → BUY
+
+**Separator:** `@` (with optional `.` after field name, e.g. `Tp.`)
+**TPs:** Single TP only
+**Images:** Almost always attached (chart image)
+
+**Instruments traded:**
+| Symbol  | Asset Class |
+|---------|-------------|
+| BTC     | Crypto      |
+| XAUUSD  | Commodity   |
+| USDCAD  | Forex       |
+| AUDUSD  | Forex       |
+| USDCHF  | Forex       |
+| USDJPY  | Forex       |
+| EURUSD  | Forex       |
+| NQ      | Index       |
+
+**Instrument aliases to normalise:**
+- `Btc` → `BTCUSD`
+- `Nq` → `NAS100`
+- `Eu` → `EURUSD` (used in update messages)
+
+**Update / management messages (not new signals — classify as trade_update):**
+- `"Set be"` — move SL to breakeven
+- `"Close partial and set be"` — take partial profit, move SL to breakeven
+- `"Close partial and set sl as be"` — same
+- `"Keep Btc sl as be"` — reminder to hold breakeven SL
+- `"Am closing this Btc trade here"` — manual close
+- `"Btc slow price action"` — commentary
+- `"<instrument> close partials"` — partial close notification
+- `"<instrument> is pushing"` — market commentary
+
+**Noise messages (ignore):**
+- Single emoji or reaction messages
+- `"VIP signal trades"` + RR summary (weekly recap, not a signal)
+- `"Daily crt"` — commentary
+- `"PWH reaction"` — commentary
+
+---
+
+### Channel 2 — XAUUSD VIP BIG LOTS (ID: 1481325093)
+
+**Signal format:** Explicit direction + order type, multiple TPs, entry can be a range.
+
+```
+XAUUSD Buy limit 4664/4656
+Sl 4643
+TP 4669
+TP 4676
+TP 4720 USE BIG LOTS ✅✔️
+```
+
+**Direction:** Explicitly stated — `Buy` / `Sell` + order type (`limit` / market implied)
+**Entry:** Single price or range (`4664/4656` — use lower for buy limit, upper for sell limit)
+**TPs:** Multiple (TP1, TP2, TP3) — each on its own line starting with `TP`
+**Images:** Rarely attached
+**Instrument:** XAUUSD only
+
+**Update / management messages (classify as trade_update):**
+- `"XAUUSD TP1 HIT RUNNING X PIPS"` — first TP reached
+- `"XAUUSD TP2 HIT RUNNING X PIPS"` — second TP reached
+- `"XAUUSD ALL TP HIT RUNNING X PIPS"` — all TPs hit
+- `"Be hit"` — stop loss moved to breakeven was hit
+- `"X PIPS PROFIT"` — running profit update
+- `"Missed close it"` / `"Just missed our limit"` — entry not triggered, cancel
+
+**Noise messages (ignore):**
+- `"React ❤️"` — engagement prompt
+- `"I'm in"` — confirmation of own entry
+- `"Go again"` — commentary
 
 ---
 
@@ -89,18 +208,21 @@ Telegram_Trader/
 {
   "id": "uuid",
   "timestamp": "ISO8601",
-  "source_channel": "channel name or id",
+  "source_channel_id": 2133117224,
+  "source_channel_name": "Vip Thrilokh",
   "raw_message": "original text",
-  "asset_class": "forex | indices | crypto | futures",
+  "message_type": "new_signal | trade_update | noise",
+  "asset_class": "forex | crypto | index | commodity",
   "instrument": "XAUUSD",
   "direction": "BUY | SELL",
+  "order_type": "market | limit",
   "entry": 2345.00,
   "entry_range": [2340.00, 2350.00],
   "sl": 2310.00,
   "tp": [2370.00, 2400.00, 2450.00],
   "has_image": false,
   "parse_status": "parsed | partial | failed",
-  "notes": "any additional context from message"
+  "notes": ""
 }
 ```
 
@@ -112,8 +234,7 @@ Telegram_Trader/
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
 TELEGRAM_PHONE=
-TELEGRAM_CHANNEL=        # channel username or numeric ID to monitor
-ANTHROPIC_API_KEY=       # for LLM-assisted parsing (Phase 1)
+ANTHROPIC_API_KEY=       # for LLM-assisted parsing fallback
 TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 ```
 
@@ -121,8 +242,11 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 
 ## Key Decisions
 
-- **User account over bot:** Bots cannot read channel history and require admin access. User account via Telethon reads any channel/group the account is a member of.
-- **LLM-assisted parsing:** Signal messages are informal and inconsistent. Claude Haiku parses ambiguous text cheaply; regex handles well-structured messages as a fast path.
+- **User account over bot:** Bots cannot read channel history and require admin access. User account via Telethon reads any channel the account is a member of.
+- **Channel-aware parsing:** Each channel has its own parser profile. A message from Channel 1 is never parsed with Channel 2's rules.
+- **Direction inference (Channel 1):** No direction keyword in messages — inferred by comparing SL vs Entry price.
+- **LLM fallback:** Regex handles the known clean formats; Claude Haiku handles edge cases and new patterns cheaply.
+- **Message classification first:** Every incoming message is classified (new_signal / trade_update / noise) before parsing. Only `new_signal` messages proceed to full parsing.
 - **JSONL journal:** Append-only, easy to tail/grep, survives crashes without corruption.
 - **Async throughout:** Telethon is async; keep the whole stack async to avoid blocking the listener.
 
@@ -137,25 +261,9 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 
 ---
 
-## Channel Strategy
-
-- **Multiple channels** are monitored simultaneously, each with a different signal style/format
-- Each channel gets its own parser profile — the system must be channel-aware
-- Parser training approach: use Option B (live message pull via Telethon) to sample each channel's last N messages, then build/tune a parser profile per channel
-- Channel profiles stored in `channels/` — one config file per channel with its known format, instrument focus, and parsing hints
-
-### Channel Onboarding Process (per channel)
-1. Pull last 50 messages via listener script
-2. Manually review and label a sample (instrument, direction, entry, TP, SL)
-3. Write/tune parser profile for that channel
-4. Validate parser against labeled sample
-5. Add channel to active monitoring list
-
----
-
 ## Open Questions
 
-- [ ] List of channel usernames/IDs to monitor (share when ready)
+- [ ] Should each channel route to a separate journal file, or one unified journal with a channel tag?
+- [ ] For Channel 1 trade updates (e.g. "Set be") — should they be linked back to the original signal by instrument name?
 - [ ] TradingView webhook URL format — confirm when Phase 2 begins
-- [ ] Should partial updates (e.g. "Move SL to entry") be linked back to the original signal?
-- [ ] Should each channel route to a separate journal, or one unified journal with channel tag?
+- [ ] Are there more channels to add beyond the current two?
