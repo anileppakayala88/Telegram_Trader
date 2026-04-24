@@ -60,15 +60,26 @@ Journal    Signal Object
 
 ---
 
+## Lightweight Design Principles
+
+- **Single process, single async event loop** — no threads, no subprocesses, no queues
+- **Minimal dependencies** — only `telethon` and `python-dotenv` (pip installable); everything else is Python stdlib
+- **Module-level functions for parsers** — no class instantiation overhead; each channel is a plain Python module
+- **Append-only JSONL** — no database, no ORM; survives crashes without corruption
+- **In-memory state is minimal** — only open signal IDs kept in memory (two dicts); full history stays on disk
+- **Fail per message, not per process** — each message is wrapped in try/except; one bad message never kills the listener
+- **Logging to file + stdout** — single `logging` config, UTF-8 encoded log file
+
 ## Tech Stack
 
 - **Language:** Python 3.11+
 - **Telegram:** Telethon (user account MTProto API)
 - **Auth:** Session file (`session_fetch.session`) — created once via `auth.py`
 - **Parsing:** Regex only for Phase 1 — Claude API (claude-haiku) fallback to be added once API key is available (TODO)
-- **Journal:** Append-only JSONL file (`journal/trades.jsonl`) + human-readable markdown summary
-- **Webhooks:** `httpx` (async HTTP client)
+- **Journal:** Append-only JSONL (`journal/<channel>.jsonl`) — one file per channel
+- **Webhooks:** `httpx` (async HTTP client) — Phase 2 only
 - **Config:** `python-dotenv` for credentials
+- **pip dependencies:** `telethon`, `python-dotenv` only
 
 ---
 
@@ -76,23 +87,30 @@ Journal    Signal Object
 
 ```
 Telegram_Trader/
-├── .env                    # credentials (never committed)
+├── .env                      # credentials (never committed)
 ├── CLAUDE.md
 ├── requirements.txt
-├── auth.py                 # one-time Telegram session auth
-├── fetch_samples.py        # pull historical messages for analysis
-├── list_channels.py        # list all channels the account is in
-├── main.py                 # entry point — starts listener
-├── listener.py             # Telethon event handler
-├── parser.py               # signal parsing logic (channel-aware)
-├── journal.py              # write to trade journal
-├── webhook.py              # TradingView webhook sender (Phase 2)
+├── auth.py                   # one-time Telegram session auth
+├── fetch_samples.py          # pull historical messages for analysis
+├── list_channels.py          # list all channels the account is in
+├── main.py                   # entry point — creates client, loads state, starts listener
+├── listener.py               # Telethon event handler — routes messages to channel parsers
+├── journal.py                # JSONL writer + in-memory state manager
+├── webhook.py                # TradingView webhook sender (Phase 2, not yet implemented)
 ├── channels/
-│   ├── vip_thrilokh.py     # parser profile for channel 1
-│   └── xauusd_big_lots.py  # parser profile for channel 2
-└── journal/
-    └── trades.jsonl        # append-only signal log
+│   ├── __init__.py           # channel registry: maps channel ID → parser module
+│   ├── vip_thrilokh.py       # parser for Channel 1 (Vip Thrilokh)
+│   └── xauusd_big_lots.py    # parser for Channel 2 (XAUUSD VIP BIG LOTS)
+└── journal/                  # created at runtime
+    ├── vip_thrilokh.jsonl    # append-only signal log for channel 1
+    └── xauusd_big_lots.jsonl # append-only signal log for channel 2
 ```
+
+### Adding a New Channel
+1. Pull sample messages via `fetch_samples.py`
+2. Add channel ID + name to `channels/__init__.py` registry and `journal.py` CHANNEL_NAMES
+3. Create `channels/<name>.py` implementing: `CHANNEL_NAME`, `CHANNEL_ID`, `classify(msg)`, `parse_signal(msg)`, `parse_update(msg, signal_id)`
+4. Add a new journal file path in `journal/`
 
 ---
 
