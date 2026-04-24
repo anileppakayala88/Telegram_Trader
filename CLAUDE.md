@@ -261,9 +261,69 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 
 ---
 
+## Journal Design
+
+- Each channel writes to its **own journal file** — no mixing between channels
+- Journal files live in `journal/` named by channel:
+  - `journal/vip_thrilokh.jsonl`
+  - `journal/xauusd_big_lots.jsonl`
+- New channels get their own journal file when onboarded
+
+### Trade Linking (update → original signal)
+
+Trade update messages must be linked back to the original signal they belong to. Linking strategy:
+
+- When a `new_signal` is parsed, it is assigned a `signal_id` (UUID) and stored as the **open trade** for that instrument on that channel
+- When a `trade_update` arrives, the parser looks up the most recent open signal for the mentioned instrument on the same channel and stamps the update with that `signal_id`
+- Updates are written as separate JSONL entries with `message_type: trade_update` and a `signal_id` reference
+- A signal is considered **closed** when any of these update messages arrive:
+  - Channel 1: `"Am closing..."`, `"close partials"` (full close implied)
+  - Channel 2: `"ALL TP HIT"`, `"Be hit"`, `"Missed close it"`, `"Just missed our limit"`
+- Open trade state is held **in memory** while the listener runs; on restart it is rebuilt by replaying the journal
+
+### Journal Entry Schema
+
+**New signal entry:**
+```json
+{
+  "signal_id": "uuid",
+  "message_type": "new_signal",
+  "timestamp": "ISO8601",
+  "source_channel_id": 2133117224,
+  "source_channel_name": "Vip Thrilokh",
+  "raw_message": "...",
+  "asset_class": "forex | crypto | index | commodity",
+  "instrument": "XAUUSD",
+  "direction": "BUY | SELL",
+  "order_type": "market | limit",
+  "entry": 2345.00,
+  "entry_range": [2340.00, 2350.00],
+  "sl": 2310.00,
+  "tp": [2370.00, 2400.00, 2450.00],
+  "has_image": false,
+  "parse_status": "parsed | partial | failed",
+  "notes": ""
+}
+```
+
+**Trade update entry:**
+```json
+{
+  "signal_id": "uuid-of-original-signal",
+  "message_type": "trade_update",
+  "timestamp": "ISO8601",
+  "source_channel_id": 2133117224,
+  "source_channel_name": "Vip Thrilokh",
+  "raw_message": "Close partial and set be",
+  "instrument": "USDCAD",
+  "update_type": "breakeven | partial_close | full_close | tp_hit | cancelled | commentary",
+  "notes": ""
+}
+```
+
+---
+
 ## Open Questions
 
-- [ ] Should each channel route to a separate journal file, or one unified journal with a channel tag?
-- [ ] For Channel 1 trade updates (e.g. "Set be") — should they be linked back to the original signal by instrument name?
 - [ ] TradingView webhook URL format — confirm when Phase 2 begins
-- [ ] Are there more channels to add beyond the current two?
+- [ ] More channels to be added later — onboard using the same channel onboarding process defined above
