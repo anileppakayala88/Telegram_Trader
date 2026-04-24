@@ -258,6 +258,7 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 - Multi-account Telegram support
 - Risk management / position sizing
 - Broker integration beyond TradingView webhooks
+- Online journal hosting (Google Sheets or similar) — add after Phase 1 logic is working
 
 ---
 
