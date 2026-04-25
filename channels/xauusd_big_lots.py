@@ -43,8 +43,7 @@ def classify(msg) -> str:
         return "noise"
     if _NOISE_RE.match(text):
         return "noise"
-    first_line = text.split("\n")[0].strip()
-    if _SIGNAL_RE.match(first_line):
+    if any(_SIGNAL_RE.match(l.strip()) for l in text.split("\n")):
         return "new_signal"
     if _ALL_TP_RE.search(text) or _TP_HIT_RE.search(text):
         return "trade_update"
@@ -61,7 +60,12 @@ def parse_signal(msg) -> dict | None:
     if not lines:
         return None
 
-    m = _SIGNAL_RE.match(lines[0])
+    m, signal_idx = None, 0
+    for i, line in enumerate(lines):
+        m = _SIGNAL_RE.match(line)
+        if m:
+            signal_idx = i
+            break
     if not m:
         return None
 
@@ -79,7 +83,7 @@ def parse_signal(msg) -> dict | None:
         entry_range = None
 
     sl, tps = None, []
-    for line in lines[1:]:
+    for line in lines[signal_idx + 1:]:
         sm = _SL_RE.match(line)
         if sm:
             sl = float(sm.group(1))

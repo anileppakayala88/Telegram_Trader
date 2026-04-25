@@ -36,7 +36,7 @@ _ASSET_CLASS = {
 #   "Usdjpy 159.390\nSl 159.602\nTp 158.552"
 #   "Sell Usdchf  0.78436\nSl 0.78641\nTp @ 0.77928"
 _SIGNAL_RE = re.compile(
-    r"^(?:(buy|sell)[ \t]+)?(\w+)[ \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
+    r"^\W*(?:(buy|sell)[ \t]+)?(\w+)[ \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
     r"[ \t]*sl\d*[. \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
     r"[ \t]*tp\d*[. \t]+@?[ \t]*([\d.]+)",
     re.IGNORECASE | re.MULTILINE,
