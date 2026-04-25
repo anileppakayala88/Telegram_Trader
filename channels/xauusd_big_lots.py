@@ -17,7 +17,7 @@ _TP_RE = re.compile(r"^tp[ \t]+([\d.]+)", re.IGNORECASE)
 _ALL_TP_RE  = re.compile(r"ALL\s+TP\s+HIT",    re.I)
 _TP_HIT_RE  = re.compile(r"TP\d+\s+HIT",       re.I)
 _BE_HIT_RE  = re.compile(r"^be\s+hit$",         re.I)
-_MISSED_RE  = re.compile(r"missed",             re.I)
+_MISSED_RE  = re.compile(r"missed|^delete$",     re.I)
 
 _NOISE_RE = re.compile(
     r"^react\b"

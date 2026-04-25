@@ -48,7 +48,10 @@ _UPDATE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bclosing\s+this\b|\bclose\s+(here|full)\b", re.I), "full_close"),
     (re.compile(r"\bclose\s+partials?\b",                 re.I),       "partial_close"),
     (re.compile(r"\bsl\s+(as\s+)?be\b|\bset\s+be\b",     re.I),       "breakeven"),
-    (re.compile(r"\btapped\b",                            re.I),       "tp_hit"),
+    (re.compile(r"\btapped\b"
+                r"|\btp\s*\d*\s+hitted?\b"   # "Tp1 hitted", "Tp 1 hitted"
+                r"|\bhitted?\s+tp\s*\d*\b",  # "Already hitted tp1"
+                re.I),                                               "tp_hit"),
 ]
 
 _NOISE_RE = re.compile(
