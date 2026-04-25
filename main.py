@@ -5,6 +5,7 @@ from telethon import TelegramClient
 from dotenv import load_dotenv
 from journal import JournalManager
 from listener import register_handlers
+import webhook
 
 load_dotenv()
 
@@ -25,6 +26,7 @@ async def main():
 
     journal = JournalManager()
     journal.load_state()
+    webhook.load_positions()
 
     client = TelegramClient("session_fetch", api_id, api_hash)
     await client.connect()

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Reads trade signal messages from a Telegram channel/group, parses them into structured trade objects, logs them to a human-readable journal, and (in a later phase) fires orders via TradingView webhooks.
+Reads trade signal messages from a Telegram channel/group, parses them into structured trade objects, logs them to a human-readable journal, and fires orders to a live broker via MetaAPI (Phase 2).
 
 ---
 
@@ -23,11 +23,17 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
 - Write parsed signal to a trade journal (human-readable log)
 - Flag unparseable messages for manual review
 
-### Phase 2 — TradingView Webhook Trigger
-- Format parsed signal into a TradingView-compatible webhook payload
-- POST to a TradingView alert webhook endpoint
-- Handle retries, failures, and confirmations
-- Support partial signals (e.g. TP-only updates, SL moves)
+### Phase 2 — MetaAPI Order Execution (current)
+- Connect to broker MT4/MT5 account via MetaAPI cloud bridge (no local terminal)
+- On new_signal: determine order type from live price vs signal price, place order with SL + TP1
+- On exit update: close open position or cancel pending order automatically
+- Persist open position/order IDs to disk so restarts don't lose track of live trades
+- DRY_RUN mode for safe testing without real order execution
+
+### Phase 2.1 — Multiple TPs + Partial Closes (deferred)
+- Split position across TP1 / TP2 / TP3
+- Auto partial-close when channel sends "close partials"
+- Move SL to breakeven after partial close
 
 ### Phase 3 — MT5 Direct (future consideration)
 - Optionally route orders directly to MT5 via Python MT5 library
@@ -55,7 +61,11 @@ Telegram (multiple channels)
 Journal    Signal Object
 (JSONL)    (structured dict)
                 |
-         [Phase 2] TradingView Webhook
+         [Phase 2] webhook.py
+                |
+         MetaAPI cloud bridge
+                |
+         MT4/MT5 broker account
 ```
 
 ---
@@ -75,11 +85,11 @@ Journal    Signal Object
 - **Language:** Python 3.11+
 - **Telegram:** Telethon (user account MTProto API)
 - **Auth:** Session file (`session_fetch.session`) — created once via `auth.py`
-- **Parsing:** Regex only for Phase 1 — Claude API (claude-haiku) fallback to be added once API key is available (TODO)
+- **Parsing:** Regex only — Claude API (claude-haiku) fallback to be added once API key is available (TODO)
 - **Journal:** Append-only JSONL (`journal/<channel>.jsonl`) — one file per channel
-- **Webhooks:** `httpx` (async HTTP client) — Phase 2 only
+- **Order execution:** MetaAPI cloud SDK (`metaapi-cloud-sdk`) — Phase 2
 - **Config:** `python-dotenv` for credentials
-- **pip dependencies:** `telethon`, `python-dotenv` only
+- **pip dependencies:** `telethon`, `python-dotenv`, `metaapi-cloud-sdk`
 
 ---
 
@@ -88,22 +98,27 @@ Journal    Signal Object
 ```
 Telegram_Trader/
 ├── .env                      # credentials (never committed)
-├── CLAUDE.md
+├── CLAUDE.md                 # project instructions for AI assistant
+├── README.md                 # human-readable project documentation
 ├── requirements.txt
 ├── auth.py                   # one-time Telegram session auth
-├── fetch_samples.py          # pull historical messages for analysis
+├── fetch_samples.py          # pull historical messages for offline parser testing
 ├── list_channels.py          # list all channels the account is in
+├── test_replay.py            # replay historical messages through the full pipeline
+├── generate_viewer.py        # generate journal_viewer.html from journal JSONL files
+├── journal_viewer_template.html  # HTML template for the journal viewer
 ├── main.py                   # entry point — creates client, loads state, starts listener
 ├── listener.py               # Telethon event handler — routes messages to channel parsers
 ├── journal.py                # JSONL writer + in-memory state manager
-├── webhook.py                # TradingView webhook sender (Phase 2, not yet implemented)
+├── webhook.py                # MetaAPI order execution (Phase 2)
 ├── channels/
 │   ├── __init__.py           # channel registry: maps channel ID → parser module
 │   ├── vip_thrilokh.py       # parser for Channel 1 (Vip Thrilokh)
 │   └── xauusd_big_lots.py    # parser for Channel 2 (XAUUSD VIP BIG LOTS)
 └── journal/                  # created at runtime
     ├── vip_thrilokh.jsonl    # append-only signal log for channel 1
-    └── xauusd_big_lots.jsonl # append-only signal log for channel 2
+    ├── xauusd_big_lots.jsonl # append-only signal log for channel 2
+    └── positions.json        # persisted MetaAPI position/order IDs (Phase 2)
 ```
 
 ### Adding a New Channel
@@ -252,8 +267,10 @@ TP 4720 USE BIG LOTS ✅✔️
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
 TELEGRAM_PHONE=
-ANTHROPIC_API_KEY=       # for LLM-assisted parsing fallback
-TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
+ANTHROPIC_API_KEY=       # for LLM-assisted parsing fallback (TODO)
+METAAPI_TOKEN=           # from app.metaapi.cloud/token (Phase 2)
+METAAPI_ACCOUNT_ID=      # MT4/MT5 account ID registered on MetaAPI (Phase 2)
+DRY_RUN=true             # set to false to place real orders (Phase 2)
 ```
 
 ---
@@ -267,6 +284,53 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 - **Message classification first:** Every incoming message is classified (new_signal / trade_update / noise) before parsing. Only `new_signal` messages proceed to full parsing.
 - **JSONL journal:** Append-only, easy to tail/grep, survives crashes without corruption.
 - **Async throughout:** Telethon is async; keep the whole stack async to avoid blocking the listener.
+- **MetaAPI over local MT5:** Broker account is on a prop firm that uses MT5. MetaAPI provides a cloud bridge so no local MT5 terminal is required.
+- **create_task for orders:** Order execution is fired as an asyncio task so it never blocks the Telegram listener from receiving the next message.
+- **DRY_RUN default true:** Orders are logged but never sent until DRY_RUN is explicitly set to false in .env — prevents accidental live trading during development.
+
+---
+
+## Phase 2 — Order Type Logic
+
+### Vip Thrilokh (dynamic — based on live price vs signal price)
+
+```
+tolerance = ENTRY_TOLERANCE_PIPS × PIP_SIZE[instrument]
+
+|current - signal_entry| ≤ tolerance  →  Market order (enter now)
+
+BUY signal:
+  current > entry + tolerance  →  BUY_LIMIT  (price ran up; wait for pullback to signal level)
+  current < entry - tolerance  →  BUY_STOP   (price hasn't reached entry; enter on rise)
+
+SELL signal:
+  current < entry - tolerance  →  SELL_LIMIT (price dropped; wait for pullback up to entry)
+  current > entry + tolerance  →  SELL_STOP  (price hasn't dropped to entry; enter on fall)
+```
+
+### XAUUSD VIP BIG LOTS (explicit — from signal text)
+
+- Order type stated directly: "Buy limit", "Sell limit", or market implied
+- Entry range (e.g. 4664/4656): use closer price to market for quicker fill
+  - BUY limit  → higher of the two (4664)
+  - SELL limit → lower  of the two (4656)
+
+### Auto-cancel triggers (both channels)
+
+Pending limit/stop orders are cancelled automatically when any of these update types arrive:
+- `cancelled`  — channel explicitly cancels ("Missed close it")
+- `tp_hit`     — TP1 reached; if order still pending, price blew past entry without filling
+- `full_close` — all TPs hit; trade is fully over
+
+### Take Profit
+
+- TP1 only for Phase 2
+- TP2 / TP3 splitting deferred to Phase 2.1
+
+### Position closing
+
+- Full position close only (no partial closes in Phase 2)
+- Triggered by: `full_close`, `sl_hit`, `cancelled`, `tp_hit` update types
 
 ---
 
@@ -275,7 +339,7 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 - Web UI or dashboard
 - Multi-account Telegram support
 - Risk management / position sizing
-- Broker integration beyond TradingView webhooks
+- Multiple TP splitting and partial closes (Phase 2.1)
 
 ---
 
