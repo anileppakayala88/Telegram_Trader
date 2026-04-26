@@ -108,7 +108,7 @@ python main.py
 
 ### Vip Thrilokh
 
-Minimal 3-line format. Direction is inferred from SL position when not stated explicitly.
+Minimal 3-line format. Direction is inferred from SL position when not stated explicitly. Leading emojis before the instrument line are handled transparently.
 
 ```
 Btc @ 74220
@@ -127,7 +127,7 @@ Tp2 @ 4706
 
 ### XAUUSD VIP BIG LOTS
 
-Explicit direction + order type + multiple TPs. Entry can be a price range.
+Explicit direction + order type + multiple TPs. Entry can be a price range. Leading emojis before the XAUUSD line are handled transparently.
 
 ```
 XAUUSD Buy limit 4664/4656
@@ -168,8 +168,8 @@ TP1 only. The first TP level in the signal is attached to the order. Multiple TP
 ### Auto-cancel (pending orders)
 
 Pending limit/stop orders are automatically cancelled when the channel sends:
-- `"Missed close it"` / `"Just missed our limit"` — entry never triggered
-- TP1 hit message — price blew past entry to TP without filling the pending order
+- `"Missed close it"` / `"Just missed our limit"` / `"Missed"` / `"Delete"` — entry never triggered
+- TP1 hit message (including `"Tp1 hitted"`, `"Already hitted tp1"`) — price blew past entry to TP without filling the pending order
 - All TP hit message — trade is completely over
 
 ### Position closing

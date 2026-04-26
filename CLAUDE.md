@@ -151,7 +151,7 @@ Access channels by **numeric ID** (no username available for either).
 
 ### Channel 1 — Vip Thrilokh (ID: 2133117224)
 
-**Signal format:** Minimal, 3-line, no direction keyword. Direction inferred from SL position.
+**Signal format:** Minimal, 3-line, no direction keyword. Direction inferred from SL position. Parser handles leading emojis on any line (e.g. 🔥 before the instrument name) via `\W*` prefix in the signal regex.
 
 ```
 Btc @ 74220
@@ -189,7 +189,8 @@ Tp. @ 70450
 - `"Close partial and set be"` — take partial profit, move SL to breakeven
 - `"Close partial and set sl as be"` — same
 - `"Keep Btc sl as be"` — reminder to hold breakeven SL
-- `"Am closing this Btc trade here"` — manual close
+- `"Am closing this Btc trade here"` — manual close (`full_close`)
+- `"Tp1 hitted"` / `"Tp 1 hitted"` / `"Already hitted tp1"` / `"tapped"` — TP hit (`tp_hit`)
 - `"Btc slow price action"` — commentary
 - `"<instrument> close partials"` — partial close notification
 - `"<instrument> is pushing"` — market commentary
@@ -204,7 +205,7 @@ Tp. @ 70450
 
 ### Channel 2 — XAUUSD VIP BIG LOTS (ID: 1481325093)
 
-**Signal format:** Explicit direction + order type, multiple TPs, entry can be a range.
+**Signal format:** Explicit direction + order type, multiple TPs, entry can be a range. Parser scans all lines for the XAUUSD signal line so leading emoji lines are handled transparently.
 
 ```
 XAUUSD Buy limit 4664/4656
@@ -226,7 +227,7 @@ TP 4720 USE BIG LOTS ✅✔️
 - `"XAUUSD ALL TP HIT RUNNING X PIPS"` — all TPs hit
 - `"Be hit"` — stop loss moved to breakeven was hit
 - `"X PIPS PROFIT"` — running profit update
-- `"Missed close it"` / `"Just missed our limit"` — entry not triggered, cancel
+- `"Missed close it"` / `"Just missed our limit"` / `"Missed"` / `"Delete"` — entry not triggered, cancel
 
 **Noise messages (ignore):**
 - `"React ❤️"` — engagement prompt
