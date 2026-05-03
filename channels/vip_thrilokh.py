@@ -59,18 +59,17 @@ _ASSET_CLASS = {
     "NAS100": "index",     "US30":   "index",   "SPX500": "index",
 }
 
-# Matches all signal variations seen in samples:
-#   "Btc @ 74220\nSl  @ 75647\nTp. @ 70450"
-#   "Sell nq @ 26678\nSl @ 26744\nTp @ 26400"
-#   "Usdjpy 159.390\nSl 159.602\nTp 158.552"
-#   "Sell Usdchf  0.78436\nSl 0.78641\nTp @ 0.77928"
-#   "BTCUSD SELL 78702\nSL 79000\nTP 78473"  (direction after instrument)
+# Matches the instrument/entry/SL/first-TP block.
+# All subsequent TP lines are captured separately via _TP_RE after the initial match.
 _SIGNAL_RE = re.compile(
     r"^\W*(?:(buy|sell)[ \t]+)?(\w+)(?:[ \t]+(buy|sell))?[ \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
     r"[ \t]*sl\d*[. \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
     r"[ \t]*tp\d*[. \t]+@?[ \t]*([\d.]+)",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Finds every TP line in the full message text (used after _SIGNAL_RE matches)
+_TP_RE = re.compile(r"^[ \t]*tp\d*[. \t]+@?[ \t]*([\d.]+)", re.IGNORECASE | re.MULTILINE)
 
 # Ordered by severity — first match wins
 _UPDATE_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -133,13 +132,13 @@ def parse_signal(msg) -> dict | None:
     if not m:
         return None
 
-    dir_before, instrument_raw, dir_after, entry_raw, sl_raw, tp_raw = m.groups()
+    dir_before, instrument_raw, dir_after, entry_raw, sl_raw, _ = m.groups()
     instrument    = _normalise(instrument_raw)
     entry         = float(entry_raw)
     sl            = float(sl_raw)
-    tp            = float(tp_raw)
     direction_raw = dir_before or dir_after
     direction     = direction_raw.upper() if direction_raw else ("SELL" if sl > entry else "BUY")
+    tps           = [float(x) for x in _TP_RE.findall(text)]
     return {
         "signal_id":           str(uuid.uuid4()),
         "telegram_msg_id":     msg.id,
@@ -155,7 +154,7 @@ def parse_signal(msg) -> dict | None:
         "entry":               entry,
         "entry_range":         None,
         "sl":                  sl,
-        "tp":                  [tp],
+        "tp":                  tps,
         "has_image":           has_image,
         "parse_status":        "parsed",
         "notes":               "",
