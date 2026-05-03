@@ -8,26 +8,56 @@ CHANNEL_ID = 2133117224
 
 # Normalise instrument names to standard symbols
 _INSTRUMENT_MAP = {
-    "btc":    "BTCUSD",
-    "nq":     "NAS100",
-    "xauusd": "XAUUSD",
-    "usdcad": "USDCAD",
-    "audusd": "AUDUSD",
-    "usdchf": "USDCHF",
-    "usdjpy": "USDJPY",
-    "eurusd": "EURUSD",
-    "eu":     "EURUSD",  # used in update messages
+    # Majors
+    "eurusd": "EURUSD", "eu":     "EURUSD",
+    "usdjpy": "USDJPY", "jpy":    "USDJPY",
+    "gbpusd": "GBPUSD", "gbp":    "GBPUSD", "cable": "GBPUSD",
+    "usdchf": "USDCHF", "chf":    "USDCHF",
+    "audusd": "AUDUSD", "aud":    "AUDUSD",
+    "usdcad": "USDCAD", "cad":    "USDCAD",
+    "nzdusd": "NZDUSD", "nzd":    "NZDUSD", "kiwi": "NZDUSD",
+    # Minors / crosses
+    "eurgbp": "EURGBP",
+    "eurjpy": "EURJPY",
+    "eurcad": "EURCAD",
+    "eurchf": "EURCHF",
+    "euraud": "EURAUD",
+    "eurnzd": "EURNZD",
+    "gbpjpy": "GBPJPY",
+    "gbpaud": "GBPAUD",
+    "gbpcad": "GBPCAD",
+    "gbpchf": "GBPCHF",
+    "gbpnzd": "GBPNZD",
+    "audjpy": "AUDJPY",
+    "audnzd": "AUDNZD",
+    "audcad": "AUDCAD",
+    "audchf": "AUDCHF",
+    "nzdjpy": "NZDJPY",
+    "cadjpy": "CADJPY",
+    "cadchf": "CADCHF",
+    "chfjpy": "CHFJPY",
+    # Commodities / crypto / indices
+    "xauusd": "XAUUSD", "gold":   "XAUUSD",
+    "xagusd": "XAGUSD", "silver": "XAGUSD",
+    "btcusd": "BTCUSD", "btc":    "BTCUSD",
+    "ethusd": "ETHUSD", "eth":    "ETHUSD",
+    "nas100": "NAS100", "nq":     "NAS100", "nasdaq": "NAS100",
+    "us30":   "US30",   "dow":    "US30",
+    "spx500": "SPX500", "sp500":  "SPX500",
 }
 
 _ASSET_CLASS = {
-    "BTCUSD": "crypto",
-    "NAS100": "index",
-    "XAUUSD": "commodity",
-    "USDCAD": "forex",
-    "AUDUSD": "forex",
-    "USDCHF": "forex",
-    "USDJPY": "forex",
-    "EURUSD": "forex",
+    "EURUSD": "forex", "USDJPY": "forex", "GBPUSD": "forex",
+    "USDCHF": "forex", "AUDUSD": "forex", "USDCAD": "forex", "NZDUSD": "forex",
+    "EURGBP": "forex", "EURJPY": "forex", "EURCAD": "forex",
+    "EURCHF": "forex", "EURAUD": "forex", "EURNZD": "forex",
+    "GBPJPY": "forex", "GBPAUD": "forex", "GBPCAD": "forex",
+    "GBPCHF": "forex", "GBPNZD": "forex",
+    "AUDJPY": "forex", "AUDNZD": "forex", "AUDCAD": "forex", "AUDCHF": "forex",
+    "NZDJPY": "forex", "CADJPY": "forex", "CADCHF": "forex", "CHFJPY": "forex",
+    "XAUUSD": "commodity", "XAGUSD": "commodity",
+    "BTCUSD": "crypto",    "ETHUSD": "crypto",
+    "NAS100": "index",     "US30":   "index",   "SPX500": "index",
 }
 
 # Matches all signal variations seen in samples:

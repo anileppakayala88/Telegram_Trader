@@ -28,29 +28,42 @@ log = logging.getLogger(__name__)
 ENTRY_TOLERANCE_PIPS = 3        # pips from signal price that still qualifies as market order
 
 PIP_SIZE: dict[str, float] = {  # price value of 1 pip per instrument
-    "EURUSD": 0.0001,
-    "USDCAD": 0.0001,
-    "AUDUSD": 0.0001,
-    "USDCHF": 0.0001,
-    "USDJPY": 0.01,
-    "XAUUSD": 0.10,
-    "NAS100": 1.0,
-    "BTCUSD": 10.0,
+    # Majors
+    "EURUSD": 0.0001, "USDJPY": 0.01,   "GBPUSD": 0.0001,
+    "USDCHF": 0.0001, "AUDUSD": 0.0001, "USDCAD": 0.0001, "NZDUSD": 0.0001,
+    # Minors / crosses — JPY pairs are 0.01, everything else 0.0001
+    "EURGBP": 0.0001, "EURJPY": 0.01,   "EURCAD": 0.0001,
+    "EURCHF": 0.0001, "EURAUD": 0.0001, "EURNZD": 0.0001,
+    "GBPJPY": 0.01,   "GBPAUD": 0.0001, "GBPCAD": 0.0001,
+    "GBPCHF": 0.0001, "GBPNZD": 0.0001,
+    "AUDJPY": 0.01,   "AUDNZD": 0.0001, "AUDCAD": 0.0001, "AUDCHF": 0.0001,
+    "NZDJPY": 0.01,   "CADJPY": 0.01,   "CADCHF": 0.0001, "CHFJPY": 0.01,
+    # Commodities / crypto / indices
+    "XAUUSD": 0.10,   "XAGUSD": 0.01,
+    "BTCUSD": 10.0,   "ETHUSD": 1.0,
+    "NAS100": 1.0,    "US30":   1.0,    "SPX500": 0.25,
 }
 
 LOT_SIZE = 0.01                 # lot size per trade — adjust per risk preference
 
-# Broker-specific symbol names — check your MT5 Market Watch for exact names.
-# Some brokers append suffixes: XAUUSD.a, BTCUSD#, NAS100.cash, etc.
+# Broker-specific symbol names — Exness appends 'm' to all symbols
 SYMBOL_MAP: dict[str, str] = {
-    "XAUUSD": "XAUUSD",
-    "BTCUSD": "BTCUSD",
-    "NAS100": "NAS100",
-    "EURUSD": "EURUSD",
-    "USDJPY": "USDJPY",
-    "USDCAD": "USDCAD",
-    "AUDUSD": "AUDUSD",
-    "USDCHF": "USDCHF",
+    # Majors
+    "EURUSD": "EURUSDm", "USDJPY": "USDJPYm", "GBPUSD": "GBPUSDm",
+    "USDCHF": "USDCHFm", "AUDUSD": "AUDUSDm", "USDCAD": "USDCADm",
+    "NZDUSD": "NZDUSDm",
+    # Minors / crosses
+    "EURGBP": "EURGBPm", "EURJPY": "EURJPYm", "EURCAD": "EURCADm",
+    "EURCHF": "EURCHFm", "EURAUD": "EURAUDm", "EURNZD": "EURNZDm",
+    "GBPJPY": "GBPJPYm", "GBPAUD": "GBPAUDm", "GBPCAD": "GBPCADm",
+    "GBPCHF": "GBPCHFm", "GBPNZD": "GBPNZDm",
+    "AUDJPY": "AUDJPYm", "AUDNZD": "AUDNZDm", "AUDCAD": "AUDCADm",
+    "AUDCHF": "AUDCHFm", "NZDJPY": "NZDJPYm", "CADJPY": "CADJPYm",
+    "CADCHF": "CADCHFm", "CHFJPY": "CHFJPYm",
+    # Commodities / crypto / indices
+    "XAUUSD": "XAUUSDm", "XAGUSD": "XAGUSDm",
+    "BTCUSD": "BTCUSDm", "ETHUSD": "ETHUSDm",
+    "NAS100": "NAS100m", "US30":   "US30m",   "SPX500": "SPX500m",
 }
 # ──────────────────────────────────────────────────────────────────────────────
 
