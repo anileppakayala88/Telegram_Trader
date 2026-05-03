@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import MetaTrader5 as mt5
@@ -79,10 +80,12 @@ _open: dict[str, int] = {}
 
 # ── MT5 connection ─────────────────────────────────────────────────────────────
 
+_MT5_RETRIES    = 3   # attempts before giving up on a single order action
+_MT5_RETRY_WAIT = 5   # seconds between retries
+
 def _connect() -> bool:
-    """Connect to the running MT5 terminal. If MT5_LOGIN / MT5_PASSWORD / MT5_SERVER
-    are set in .env, logs into that account automatically; otherwise connects to
-    whichever account is already open in the terminal."""
+    """Connect to the running MT5 terminal with up to _MT5_RETRIES attempts.
+    Retries handle the case where MT5 is mid-restart when a signal arrives."""
     login    = os.getenv("MT5_LOGIN")
     password = os.getenv("MT5_PASSWORD")
     server   = os.getenv("MT5_SERVER")
@@ -91,22 +94,53 @@ def _connect() -> bool:
     if login and password and server:
         kwargs = {"login": int(login), "password": password, "server": server}
 
-    if not mt5.initialize(**kwargs):
-        log.error(f"MT5 initialize failed: {mt5.last_error()}")
-        return False
-    return True
+    for attempt in range(1, _MT5_RETRIES + 1):
+        if mt5.initialize(**kwargs):
+            return True
+        err = mt5.last_error()
+        if attempt < _MT5_RETRIES:
+            log.warning(f"MT5 initialize failed (attempt {attempt}/{_MT5_RETRIES}): {err} — retrying in {_MT5_RETRY_WAIT}s")
+            time.sleep(_MT5_RETRY_WAIT)
+        else:
+            log.error(f"MT5 initialize failed after {_MT5_RETRIES} attempts: {err}")
+    return False
 
 
 # ── Persistence ────────────────────────────────────────────────────────────────
 
 def load_state() -> None:
-    """Load persisted ticket map from disk on startup so open positions survive
-    bot restarts. Called once from main.py."""
+    """Load persisted ticket map from disk and reconcile against live MT5 state.
+    Prunes any tickets that no longer exist in MT5 (closed/cancelled while bot
+    was down) so stale entries don't cause false close attempts."""
     global _open
-    if _POSITIONS_FILE.exists():
-        with open(_POSITIONS_FILE, encoding="utf-8") as f:
-            _open = {k: int(v) for k, v in json.load(f).items()}
-        log.info(f"Loaded {len(_open)} tracked positions from disk")
+    if not _POSITIONS_FILE.exists():
+        return
+
+    with open(_POSITIONS_FILE, encoding="utf-8") as f:
+        _open = {k: int(v) for k, v in json.load(f).items()}
+    log.info(f"Loaded {len(_open)} tracked positions from disk")
+
+    if not _open or DRY_RUN:
+        return
+
+    if not _connect():
+        log.warning("MT5 unavailable at startup — skipping position reconciliation; stale tickets may exist")
+        return
+
+    stale = []
+    for signal_id, ticket in _open.items():
+        live    = mt5.positions_get(ticket=ticket)
+        pending = mt5.orders_get(ticket=ticket)
+        if not live and not pending:
+            log.warning(f"Startup reconcile: ticket {ticket} not found in MT5 — removing (signal_id={signal_id})")
+            stale.append(signal_id)
+
+    for sid in stale:
+        _open.pop(sid)
+
+    if stale:
+        _save()
+        log.info(f"Reconciliation removed {len(stale)} stale ticket(s); {len(_open)} active positions remain")
 
 
 def _save() -> None:
