@@ -29,7 +29,7 @@ async def replay():
 
     journal = JournalManager()
 
-    client = TelegramClient("session_fetch", api_id, api_hash)
+    client = TelegramClient("session_replay", api_id, api_hash)
     await client.connect()
 
     if not await client.is_user_authorized():

@@ -36,9 +36,11 @@ async def main():
         log.error("Not authorized — run auth.py first")
         return
 
-    # Pre-resolve all channel entities so Telethon caches them before the
-    # NewMessage filter is evaluated — without this, newly-added channels
-    # are missed until the next restart where the session already has them.
+    # Fetch all dialogs first so Telethon caches channel entities,
+    # then resolve each channel so the NewMessage filter can match by ID.
+    log.info("Fetching dialogs to cache channel entities...")
+    await client.get_dialogs()
+
     for channel_id in CHANNEL_PARSERS:
         try:
             await client.get_entity(channel_id)
