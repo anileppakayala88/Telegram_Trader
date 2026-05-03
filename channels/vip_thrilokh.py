@@ -1,7 +1,6 @@
 import re
 import uuid
 from datetime import timezone
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
 CHANNEL_NAME = "Vip Thrilokh"
 CHANNEL_ID = 2133117224
@@ -128,24 +127,19 @@ def classify(msg) -> str:
 
 def parse_signal(msg) -> dict | None:
     text = (msg.text or "").strip()
+    has_image = msg.media is not None
+
     m = _SIGNAL_RE.search(text)
     if not m:
         return None
 
     dir_before, instrument_raw, dir_after, entry_raw, sl_raw, tp_raw = m.groups()
-    instrument = _normalise(instrument_raw)
-    entry = float(entry_raw)
-    sl    = float(sl_raw)
-    tp    = float(tp_raw)
-
+    instrument    = _normalise(instrument_raw)
+    entry         = float(entry_raw)
+    sl            = float(sl_raw)
+    tp            = float(tp_raw)
     direction_raw = dir_before or dir_after
-    if direction_raw:
-        direction = direction_raw.upper()
-    else:
-        direction = "SELL" if sl > entry else "BUY"
-
-    has_image = isinstance(msg.media, (MessageMediaPhoto, MessageMediaDocument))
-
+    direction     = direction_raw.upper() if direction_raw else ("SELL" if sl > entry else "BUY")
     return {
         "signal_id":           str(uuid.uuid4()),
         "telegram_msg_id":     msg.id,

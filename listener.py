@@ -52,6 +52,7 @@ def register_handlers(client, journal):
                 if not entry:
                     log.warning(f"[{parser.CHANNEL_NAME}] classify=new_signal but parse failed — msg_id={msg.id}")
                     return
+
                 journal.write(channel_id, entry)
                 journal.track_signal(channel_id, msg.id, entry["signal_id"])
                 log.info(

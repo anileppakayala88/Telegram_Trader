@@ -63,7 +63,14 @@ PIP_SIZE: dict[str, float] = {  # price value of 1 pip per instrument
     "NAS100": 1.0,    "US30":   1.0,    "SPX500": 0.25,
 }
 
-LOT_SIZE = 0.01                 # lot size per trade — adjust per risk preference
+LOT_SIZE = 0.01                 # lot size per TP order — each TP level gets its own order at this size
+
+# TP order configuration
+# TP1 and TP2 are always placed when available in the signal.
+# Set USE_TP3=true in .env to also place a third order targeting TP3.
+# If the signal has fewer TPs than the active limit, only available TPs are used.
+USE_TP3 = os.getenv("USE_TP3", "false").lower() == "true"
+_MAX_TP_ORDERS = 3 if USE_TP3 else 2
 
 # Broker-specific symbol names — Exness appends 'm' to all symbols
 SYMBOL_MAP: dict[str, str] = {
@@ -90,10 +97,10 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 _POSITIONS_FILE = Path("journal/positions.json")
 
-# In-memory map: signal_id → MT5 ticket number (int)
-# Ticket covers both pending orders and live positions — MT5 uses the same
-# ticket number whether the order is pending or has been filled.
-_open: dict[str, int] = {}
+# In-memory map: signal_id → list of MT5 ticket numbers (one per TP order).
+# Multiple tickets per signal because each TP level is a separate order.
+# MT5 uses the same ticket number whether an order is pending or filled.
+_open: dict[str, list[int]] = {}
 
 
 # ── MT5 connection ─────────────────────────────────────────────────────────────
@@ -128,15 +135,24 @@ def _connect() -> bool:
 
 def load_state() -> None:
     """Load persisted ticket map from disk and reconcile against live MT5 state.
-    Prunes any tickets that no longer exist in MT5 (closed/cancelled while bot
-    was down) so stale entries don't cause false close attempts."""
+    Migrates old single-ticket format (signal_id → int) to list format automatically.
+    Prunes tickets that no longer exist in MT5 (closed while bot was down)."""
     global _open
     if not _POSITIONS_FILE.exists():
         return
 
     with open(_POSITIONS_FILE, encoding="utf-8") as f:
-        _open = {k: int(v) for k, v in json.load(f).items()}
-    log.info(f"Loaded {len(_open)} tracked positions from disk")
+        raw = json.load(f)
+
+    # Migrate: old format stored a single int; new format stores a list
+    _open = {}
+    for k, v in raw.items():
+        if isinstance(v, list):
+            _open[k] = [int(t) for t in v]
+        else:
+            _open[k] = [int(v)]
+
+    log.info(f"Loaded {len(_open)} tracked signals ({sum(len(t) for t in _open.values())} tickets) from disk")
 
     if not _open or DRY_RUN:
         return
@@ -145,20 +161,27 @@ def load_state() -> None:
         log.warning("MT5 unavailable at startup — skipping position reconciliation; stale tickets may exist")
         return
 
-    stale = []
-    for signal_id, ticket in _open.items():
-        live    = mt5.positions_get(ticket=ticket)
-        pending = mt5.orders_get(ticket=ticket)
-        if not live and not pending:
-            log.warning(f"Startup reconcile: ticket {ticket} not found in MT5 — removing (signal_id={signal_id})")
-            stale.append(signal_id)
+    stale_signals = []
+    for signal_id, tickets in _open.items():
+        remaining = []
+        for ticket in tickets:
+            live    = mt5.positions_get(ticket=ticket)
+            pending = mt5.orders_get(ticket=ticket)
+            if live or pending:
+                remaining.append(ticket)
+            else:
+                log.warning(f"Startup reconcile: ticket {ticket} not found in MT5 — removing (signal_id={signal_id})")
+        if remaining:
+            _open[signal_id] = remaining
+        else:
+            stale_signals.append(signal_id)
 
-    for sid in stale:
+    for sid in stale_signals:
         _open.pop(sid)
 
-    if stale:
+    if stale_signals:
         _save()
-        log.info(f"Reconciliation removed {len(stale)} stale ticket(s); {len(_open)} active positions remain")
+        log.info(f"Reconciliation removed {len(stale_signals)} fully closed signal(s); {len(_open)} active remain")
 
 
 def _save() -> None:
@@ -175,8 +198,8 @@ def _resolve_thrilokh(signal: dict) -> tuple[int, int, float]:
     signal_entry = signal["entry"]
     instrument   = signal["instrument"]
     symbol       = SYMBOL_MAP.get(instrument, instrument)
-    tol_pips  = ENTRY_TOLERANCE_PIPS.get(instrument, _DEFAULT_TOLERANCE_PIPS)
-    tolerance = tol_pips * PIP_SIZE.get(instrument, 0.0001)
+    tol_pips     = ENTRY_TOLERANCE_PIPS.get(instrument, _DEFAULT_TOLERANCE_PIPS)
+    tolerance    = tol_pips * PIP_SIZE.get(instrument, 0.0001)
 
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
@@ -226,15 +249,25 @@ def _place_order_sync(signal: dict) -> None:
     signal_id  = signal["signal_id"]
     instrument = signal["instrument"]
     sl         = signal.get("sl")
-    tp1        = signal["tp"][0] if signal.get("tp") else None
+    tps        = signal.get("tp") or []
     channel_id = signal["source_channel_id"]
     symbol     = SYMBOL_MAP.get(instrument, instrument)
 
-    if DRY_RUN:
-        log.info(
-            f"[DRY RUN] place_order — {signal['direction']} {instrument} "
-            f"SL={sl} TP={tp1} signal_id={signal_id}"
+    if not tps or sl is None:
+        log.warning(
+            f"place_order skipped — signal must have both SL and at least one TP "
+            f"(sl={sl}, tps={tps}) signal_id={signal_id}"
         )
+        return
+
+    tp_levels = tps[:_MAX_TP_ORDERS]
+
+    if DRY_RUN:
+        for i, tp in enumerate(tp_levels, 1):
+            log.info(
+                f"[DRY RUN] place_order TP{i}/{len(tp_levels)} — "
+                f"{signal['direction']} {instrument} SL={sl} TP={tp} signal_id={signal_id}"
+            )
         return
 
     if not _connect():
@@ -252,30 +285,36 @@ def _place_order_sync(signal: dict) -> None:
         # Market orders use IOC; pending orders use RETURN (partial fill allowed)
         filling = mt5.ORDER_FILLING_IOC if action == mt5.TRADE_ACTION_DEAL else mt5.ORDER_FILLING_RETURN
 
-        request: dict = {
-            "action":       action,
-            "symbol":       symbol,
-            "volume":       LOT_SIZE,
-            "type":         mt5_type,
-            "price":        price,
-            "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": filling,
-        }
-        if sl  is not None: request["sl"] = sl
-        if tp1 is not None: request["tp"] = tp1
+        tickets = []
+        for i, tp in enumerate(tp_levels, 1):
+            request: dict = {
+                "action":       action,
+                "symbol":       symbol,
+                "volume":       LOT_SIZE,
+                "type":         mt5_type,
+                "price":        price,
+                "type_time":    mt5.ORDER_TIME_GTC,
+                "type_filling": filling,
+            }
+            request["sl"] = sl
+            request["tp"] = tp
 
-        log.info(f"Sending order: {instrument} {signal['direction']} @ {price} SL={sl} TP={tp1} request={request}")
-        result = mt5.order_send(request)
+            log.info(f"Sending TP{i} order: {instrument} {signal['direction']} @ {price} SL={sl} TP={tp}")
+            result = mt5.order_send(request)
 
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            retcode = result.retcode if result else None
-            err     = result.comment if result else mt5.last_error()
-            log.error(f"order_send failed retcode={retcode} err={err}: {instrument} {signal['direction']}")
-            return
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                retcode = result.retcode if result else None
+                err     = result.comment if result else mt5.last_error()
+                log.error(f"order_send TP{i} failed retcode={retcode} err={err}: {instrument} {signal['direction']}")
+                continue
 
-        _open[signal_id] = result.order
-        _save()
-        log.info(f"Order placed: ticket={result.order} {instrument} {signal['direction']} @ {price}")
+            tickets.append(result.order)
+            log.info(f"TP{i} order placed: ticket={result.order} {instrument} {signal['direction']} @ {price} TP={tp}")
+
+        if tickets:
+            _open[signal_id] = tickets
+            _save()
+            log.info(f"Signal {signal_id}: {len(tickets)}/{len(tp_levels)} orders placed — tickets={tickets}")
 
     except Exception:
         log.exception(f"place_order failed — signal_id={signal_id}")
@@ -293,52 +332,52 @@ def _handle_close_sync(signal_id: str) -> None:
         log.info(f"[DRY RUN] handle_close — signal_id={signal_id}")
         return
 
-    ticket = _open.get(signal_id)
-    if not ticket:
-        log.warning(f"handle_close: no tracked ticket for signal_id={signal_id}")
+    tickets = _open.get(signal_id)
+    if not tickets:
+        log.warning(f"handle_close: no tracked tickets for signal_id={signal_id}")
         return
 
     if not _connect():
         return
 
     try:
-        # Check for a live position first
-        positions = mt5.positions_get(ticket=ticket)
-        if positions:
-            pos        = positions[0]
-            close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-            tick       = mt5.symbol_info_tick(pos.symbol)
-            price      = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
-            request = {
-                "action":       mt5.TRADE_ACTION_DEAL,
-                "symbol":       pos.symbol,
-                "volume":       pos.volume,
-                "type":         close_type,
-                "position":     pos.ticket,
-                "price":        price,
-                "comment":      f"close:{signal_id[:24]}",
-                "type_time":    mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
-            }
-            result = mt5.order_send(request)
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                err = result.comment if result else mt5.last_error()
-                log.error(f"Close failed ({err}): ticket={ticket}")
-                return
-            log.info(f"Position closed: ticket={ticket} signal_id={signal_id}")
-
-        else:
-            # Check for a pending order
-            orders = mt5.orders_get(ticket=ticket)
-            if orders:
-                result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+        for ticket in list(tickets):
+            # Check for a live position first
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                pos        = positions[0]
+                close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                tick       = mt5.symbol_info_tick(pos.symbol)
+                price      = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+                request = {
+                    "action":       mt5.TRADE_ACTION_DEAL,
+                    "symbol":       pos.symbol,
+                    "volume":       pos.volume,
+                    "type":         close_type,
+                    "position":     pos.ticket,
+                    "price":        price,
+                    "type_time":    mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                result = mt5.order_send(request)
                 if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                     err = result.comment if result else mt5.last_error()
-                    log.error(f"Cancel failed ({err}): ticket={ticket}")
-                    return
-                log.info(f"Pending order cancelled: ticket={ticket} signal_id={signal_id}")
+                    log.error(f"Close failed ({err}): ticket={ticket}")
+                else:
+                    log.info(f"Position closed: ticket={ticket} signal_id={signal_id}")
+
             else:
-                log.warning(f"Ticket {ticket} not found — already closed/cancelled?")
+                # Check for a pending order
+                orders = mt5.orders_get(ticket=ticket)
+                if orders:
+                    result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                        err = result.comment if result else mt5.last_error()
+                        log.error(f"Cancel failed ({err}): ticket={ticket}")
+                    else:
+                        log.info(f"Pending order cancelled: ticket={ticket} signal_id={signal_id}")
+                else:
+                    log.warning(f"Ticket {ticket} not found — already closed/cancelled?")
 
     except Exception:
         log.exception(f"handle_close failed — signal_id={signal_id}")
