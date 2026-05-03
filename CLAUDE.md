@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Reads trade signal messages from a Telegram channel/group, parses them into structured trade objects, logs them to a human-readable journal, and (in a later phase) fires orders via TradingView webhooks.
+Reads trade signal messages from a Telegram channel/group, parses them into structured trade objects, logs them to a human-readable journal, and fires orders to a live broker via MetaAPI (Phase 2).
 
 ---
 
@@ -23,15 +23,20 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
 - Write parsed signal to a trade journal (human-readable log)
 - Flag unparseable messages for manual review
 
-### Phase 2 — TradingView Webhook Trigger
-- Format parsed signal into a TradingView-compatible webhook payload
-- POST to a TradingView alert webhook endpoint
-- Handle retries, failures, and confirmations
-- Support partial signals (e.g. TP-only updates, SL moves)
+### Phase 2 — MT5 Direct Order Execution (complete)
+- Connect to locally running MT5 terminal via MetaTrader5 Python library (Windows only)
+- On new_signal: determine order type from live price vs signal price, place order with SL + TP1
+- On exit update: close open position or cancel pending order automatically
+- Persist open position/order IDs to disk so restarts don't lose track of live trades
+- DRY_RUN mode for safe testing without real order execution
 
-### Phase 3 — MT5 Direct (future consideration)
-- Optionally route orders directly to MT5 via Python MT5 library
-- Not in scope until Phase 2 is validated
+### Phase 2.1 — Multiple TPs + Partial Closes (deferred)
+- Split position across TP1 / TP2 / TP3
+- Auto partial-close when channel sends "close partials"
+- Move SL to breakeven after partial close
+
+### Phase 3 — LLM fallback parser (future)
+- Add Claude Haiku fallback for messages that don't match the regex parser
 
 ---
 
@@ -55,7 +60,13 @@ Telegram (multiple channels)
 Journal    Signal Object
 (JSONL)    (structured dict)
                 |
-         [Phase 2] TradingView Webhook
+         [Phase 2] webhook.py
+                |
+         MetaTrader5 Python library
+                |
+         MT5 terminal (local, Windows)
+                |
+         Broker account (Exness)
 ```
 
 ---
@@ -75,11 +86,11 @@ Journal    Signal Object
 - **Language:** Python 3.11+
 - **Telegram:** Telethon (user account MTProto API)
 - **Auth:** Session file (`session_fetch.session`) — created once via `auth.py`
-- **Parsing:** Regex only for Phase 1 — Claude API (claude-haiku) fallback to be added once API key is available (TODO)
+- **Parsing:** Regex only — Claude API (claude-haiku) fallback to be added once API key is available (TODO)
 - **Journal:** Append-only JSONL (`journal/<channel>.jsonl`) — one file per channel
-- **Webhooks:** `httpx` (async HTTP client) — Phase 2 only
+- **Order execution:** MetaTrader5 Python library (`MetaTrader5`) — connects directly to a locally running MT5 terminal (Windows only)
 - **Config:** `python-dotenv` for credentials
-- **pip dependencies:** `telethon`, `python-dotenv` only
+- **pip dependencies:** `telethon`, `python-dotenv`, `MetaTrader5`
 
 ---
 
@@ -88,22 +99,27 @@ Journal    Signal Object
 ```
 Telegram_Trader/
 ├── .env                      # credentials (never committed)
-├── CLAUDE.md
+├── CLAUDE.md                 # project instructions for AI assistant
+├── README.md                 # human-readable project documentation
 ├── requirements.txt
 ├── auth.py                   # one-time Telegram session auth
-├── fetch_samples.py          # pull historical messages for analysis
+├── fetch_samples.py          # pull historical messages for offline parser testing
 ├── list_channels.py          # list all channels the account is in
+├── test_replay.py            # replay historical messages through the full pipeline
+├── generate_viewer.py        # generate journal_viewer.html from journal JSONL files
+├── journal_viewer_template.html  # HTML template for the journal viewer
 ├── main.py                   # entry point — creates client, loads state, starts listener
 ├── listener.py               # Telethon event handler — routes messages to channel parsers
 ├── journal.py                # JSONL writer + in-memory state manager
-├── webhook.py                # TradingView webhook sender (Phase 2, not yet implemented)
+├── webhook.py                # MetaAPI order execution (Phase 2)
 ├── channels/
 │   ├── __init__.py           # channel registry: maps channel ID → parser module
 │   ├── vip_thrilokh.py       # parser for Channel 1 (Vip Thrilokh)
 │   └── xauusd_big_lots.py    # parser for Channel 2 (XAUUSD VIP BIG LOTS)
 └── journal/                  # created at runtime
     ├── vip_thrilokh.jsonl    # append-only signal log for channel 1
-    └── xauusd_big_lots.jsonl # append-only signal log for channel 2
+    ├── xauusd_big_lots.jsonl # append-only signal log for channel 2
+    └── positions.json        # persisted MetaAPI position/order IDs (Phase 2)
 ```
 
 ### Adding a New Channel
@@ -127,8 +143,9 @@ Telegram_Trader/
 |----------------------|--------------|------------- |------------------------------------|
 | Vip Thrilokh         | 2133117224   | no-username  | Multi-asset (BTC, Forex, NQ)       |
 | XAUUSD VIP BIG LOTS  | 1481325093   | no-username  | XAUUSD only                        |
+| Test_TV_3min         | 2540865305   | no-username  | Dev/test — uses Vip Thrilokh parser |
 
-Access channels by **numeric ID** (no username available for either).
+Access channels by **numeric ID** (no username available for any).
 
 ---
 
@@ -136,7 +153,7 @@ Access channels by **numeric ID** (no username available for either).
 
 ### Channel 1 — Vip Thrilokh (ID: 2133117224)
 
-**Signal format:** Minimal, 3-line, no direction keyword. Direction inferred from SL position.
+**Signal format:** Minimal, 3-line, no direction keyword. Direction inferred from SL position. Parser handles leading emojis on any line (e.g. 🔥 before the instrument name) via `\W*` prefix in the signal regex.
 
 ```
 Btc @ 74220
@@ -174,7 +191,8 @@ Tp. @ 70450
 - `"Close partial and set be"` — take partial profit, move SL to breakeven
 - `"Close partial and set sl as be"` — same
 - `"Keep Btc sl as be"` — reminder to hold breakeven SL
-- `"Am closing this Btc trade here"` — manual close
+- `"Am closing this Btc trade here"` — manual close (`full_close`)
+- `"Tp1 hitted"` / `"Tp 1 hitted"` / `"Already hitted tp1"` / `"tapped"` — TP hit (`tp_hit`)
 - `"Btc slow price action"` — commentary
 - `"<instrument> close partials"` — partial close notification
 - `"<instrument> is pushing"` — market commentary
@@ -189,7 +207,7 @@ Tp. @ 70450
 
 ### Channel 2 — XAUUSD VIP BIG LOTS (ID: 1481325093)
 
-**Signal format:** Explicit direction + order type, multiple TPs, entry can be a range.
+**Signal format:** Explicit direction + order type, multiple TPs, entry can be a range. Parser scans all lines for the XAUUSD signal line so leading emoji lines are handled transparently.
 
 ```
 XAUUSD Buy limit 4664/4656
@@ -211,7 +229,7 @@ TP 4720 USE BIG LOTS ✅✔️
 - `"XAUUSD ALL TP HIT RUNNING X PIPS"` — all TPs hit
 - `"Be hit"` — stop loss moved to breakeven was hit
 - `"X PIPS PROFIT"` — running profit update
-- `"Missed close it"` / `"Just missed our limit"` — entry not triggered, cancel
+- `"Missed close it"` / `"Just missed our limit"` / `"Missed"` / `"Delete"` — entry not triggered, cancel
 
 **Noise messages (ignore):**
 - `"React ❤️"` — engagement prompt
@@ -252,8 +270,11 @@ TP 4720 USE BIG LOTS ✅✔️
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
 TELEGRAM_PHONE=
-ANTHROPIC_API_KEY=       # for LLM-assisted parsing fallback
-TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
+ANTHROPIC_API_KEY=       # for LLM-assisted parsing fallback (TODO)
+MT5_LOGIN=               # MT5 account number (Phase 2)
+MT5_PASSWORD=            # MT5 account password (Phase 2)
+MT5_SERVER=              # broker server name shown on MT5 login screen (Phase 2)
+DRY_RUN=true             # set to false to place real orders (Phase 2)
 ```
 
 ---
@@ -262,11 +283,95 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 
 - **User account over bot:** Bots cannot read channel history and require admin access. User account via Telethon reads any channel the account is a member of.
 - **Channel-aware parsing:** Each channel has its own parser profile. A message from Channel 1 is never parsed with Channel 2's rules.
-- **Direction inference (Channel 1):** No direction keyword in messages — inferred by comparing SL vs Entry price.
+- **Direction inference (Channel 1):** No direction keyword in messages — inferred by comparing SL vs Entry price. Direction keyword can also appear after the instrument name (e.g. `BTCUSD SELL 78702`).
 - **LLM fallback:** Regex handles the known clean formats; Claude Haiku handles edge cases and new patterns cheaply.
 - **Message classification first:** Every incoming message is classified (new_signal / trade_update / noise) before parsing. Only `new_signal` messages proceed to full parsing.
 - **JSONL journal:** Append-only, easy to tail/grep, survives crashes without corruption.
 - **Async throughout:** Telethon is async; keep the whole stack async to avoid blocking the listener.
+- **MT5 Python library direct:** Orders are placed via the `MetaTrader5` Python library connecting to a locally running MT5 terminal (Windows only). No MetaAPI cloud bridge needed.
+- **MT5 order_send — no `comment` field:** The MetaTrader5 Python library rejects any `comment` key in the order request dict (returns error -2 even for an empty string). The `comment` key must be omitted entirely.
+- **Telethon marked IDs:** `event.chat_id` returns negative marked IDs (e.g. `-1002540865305` for channel `2540865305`). `listener.py` normalises these back to raw positive IDs before looking up the parser.
+- **outgoing=True on NewMessage:** When testing with own account messages, Telethon's `NewMessage` handler must include `outgoing=True` — by default it only fires for incoming messages.
+- **create_task for orders:** Order execution is fired as an asyncio task so it never blocks the Telegram listener from receiving the next message.
+- **DRY_RUN default true:** Orders are logged but never sent until DRY_RUN is explicitly set to false in .env — prevents accidental live trading during development.
+
+---
+
+## Phase 2 — Order Type Logic
+
+### Vip Thrilokh (dynamic — based on live price vs signal price)
+
+Tolerance is **per-symbol** (defined in `ENTRY_TOLERANCE_PIPS` dict in `webhook.py`):
+
+| Asset class | Tolerance | Rationale |
+|---|---|---|
+| Forex majors/minors | 3 pips | Tight spreads, stable price action |
+| XAUUSD / XAGUSD | 5 pips | Wider spread + volatility |
+| NAS100 / US30 | 10 pips | Index volatility |
+| SPX500 | 5 pips | Less volatile than NAS/DOW |
+| BTCUSD | 50 pips | 30-point swings are noise |
+| ETHUSD | 20 pips | Less volatile than BTC |
+
+Dollar value of tolerance at 0.01 lot (micro lot):
+
+| Instrument | Tolerance | $ value |
+|---|---|---|
+| Forex (e.g. EURUSD) | 3 pips | ~$0.30 |
+| XAUUSD | 5 pips | ~$0.50 |
+| NAS100 | 10 pips | ~$1.00 |
+| BTCUSD | 50 pips | ~$5.00 |
+
+Decision tree:
+```
+tolerance = ENTRY_TOLERANCE_PIPS[instrument] × PIP_SIZE[instrument]
+
+|current - signal_entry| ≤ tolerance  →  Market order at live price
+
+BUY signal:
+  current > entry + tolerance  →  BUY_LIMIT  (price ran up; wait for pullback to signal level)
+  current < entry - tolerance  →  BUY_STOP   (price hasn't reached entry; enter on rise)
+
+SELL signal:
+  current < entry - tolerance  →  SELL_LIMIT (price dropped; wait for pullback up to entry)
+  current > entry + tolerance  →  SELL_STOP  (price hasn't dropped to entry; enter on fall)
+```
+
+Example — BUY signal XAUUSD entry $2000, tolerance $0.50:
+- Live ask $2000.30 → Market order (within tolerance)
+- Live ask $2001.80 → BUY LIMIT at $2000 (price ran above entry, wait for pullback)
+- Live ask $1998.00 → BUY STOP  at $2000 (price below entry, enter when it rises)
+
+Example — SELL signal XAUUSD entry $2000, tolerance $0.50:
+- Live bid $1999.80 → Market order (within tolerance)
+- Live bid $1998.20 → SELL LIMIT at $2000 (price fell below entry, wait for bounce back up)
+- Live bid $2001.80 → SELL STOP  at $2000 (price above entry, enter when it drops)
+
+LIMIT = "enter at a better price than now" (pending below market for BUY, above market for SELL)
+STOP  = "enter when price confirms the move by reaching my level"
+
+### XAUUSD VIP BIG LOTS (explicit — from signal text)
+
+- Order type stated directly: "Buy limit", "Sell limit", or market implied
+- Entry range (e.g. 4664/4656): use closer price to market for quicker fill
+  - BUY limit  → higher of the two (4664)
+  - SELL limit → lower  of the two (4656)
+
+### Auto-cancel triggers (both channels)
+
+Pending limit/stop orders are cancelled automatically when any of these update types arrive:
+- `cancelled`  — channel explicitly cancels ("Missed close it")
+- `tp_hit`     — TP1 reached; if order still pending, price blew past entry without filling
+- `full_close` — all TPs hit; trade is fully over
+
+### Take Profit
+
+- TP1 only for Phase 2
+- TP2 / TP3 splitting deferred to Phase 2.1
+
+### Position closing
+
+- Full position close only (no partial closes in Phase 2)
+- Triggered by: `full_close`, `sl_hit`, `cancelled`, `tp_hit` update types
 
 ---
 
@@ -275,7 +380,7 @@ TRADINGVIEW_WEBHOOK_URL= # TradingView alert webhook URL (Phase 2)
 - Web UI or dashboard
 - Multi-account Telegram support
 - Risk management / position sizing
-- Broker integration beyond TradingView webhooks
+- Multiple TP splitting and partial closes (Phase 2.1)
 
 ---
 

@@ -5,6 +5,8 @@ from telethon import TelegramClient
 from dotenv import load_dotenv
 from journal import JournalManager
 from listener import register_handlers
+from channels import CHANNEL_PARSERS
+import webhook
 
 load_dotenv()
 
@@ -25,6 +27,7 @@ async def main():
 
     journal = JournalManager()
     journal.load_state()
+    webhook.load_state()
 
     client = TelegramClient("session_fetch", api_id, api_hash)
     await client.connect()
@@ -32,6 +35,18 @@ async def main():
     if not await client.is_user_authorized():
         log.error("Not authorized — run auth.py first")
         return
+
+    # Fetch all dialogs first so Telethon caches channel entities,
+    # then resolve each channel so the NewMessage filter can match by ID.
+    log.info("Fetching dialogs to cache channel entities...")
+    await client.get_dialogs()
+
+    for channel_id in CHANNEL_PARSERS:
+        try:
+            await client.get_entity(channel_id)
+            log.info(f"Resolved entity for channel {channel_id}")
+        except Exception as e:
+            log.warning(f"Could not resolve entity for channel {channel_id}: {e}")
 
     register_handlers(client, journal)
     log.info("Listening for trade signals...")

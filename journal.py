@@ -9,6 +9,7 @@ JOURNAL_DIR = Path("journal")
 CHANNEL_NAMES = {
     2133117224: "vip_thrilokh",
     1481325093: "xauusd_big_lots",
+    2540865305: "test_tv_3min",
 }
 
 
