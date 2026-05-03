@@ -73,8 +73,9 @@ TELEGRAM_API_ID=        # from my.telegram.org
 TELEGRAM_API_HASH=      # from my.telegram.org
 TELEGRAM_PHONE=         # your phone number including country code
 
-METAAPI_TOKEN=          # from app.metaapi.cloud/token
-METAAPI_ACCOUNT_ID=     # your MT4/MT5 account ID registered on MetaAPI
+MT5_LOGIN=              # your MT5 account number
+MT5_PASSWORD=           # your MT5 account password
+MT5_SERVER=             # broker server name (visible in MT5 login screen)
 
 DRY_RUN=true            # set to false when ready to place real orders
 ```
@@ -247,6 +248,7 @@ Set `DRY_RUN=true` in `.env`. Every `place_order` and `handle_close` call will l
 | `ENTRY_TOLERANCE_PIPS` | `3` | Max pips from signal price to still use a market order |
 | `PIP_SIZE` | per instrument | Price value of 1 pip — adjust if broker quotes differently |
 | `LOT_SIZE` | `0.01` | Lot size per trade |
+| `SYMBOL_MAP` | standard names | Maps signal instrument names to broker-specific MT5 symbol names (some brokers add suffixes like `.a`, `#`, `.cash`) |
 | `DRY_RUN` | `true` (from .env) | Log orders without executing — set to false for live trading |
 
 ---
@@ -265,6 +267,6 @@ Set `DRY_RUN=true` in `.env`. Every `place_order` and `handle_close` call will l
 | Phase | Status | Description |
 |---|---|---|
 | Phase 1 | Complete | Signal reader, parser, journal |
-| Phase 2 | In progress | MetaAPI order execution — market / limit / stop orders, TP1, full close |
+| Phase 2 | In progress | MT5 direct order execution — market / limit / stop orders, TP1, full close |
 | Phase 2.1 | Planned | Multiple TP splitting, partial closes, breakeven SL moves |
 | Phase 3 | Future | LLM fallback parser (Claude Haiku) for edge-case messages |

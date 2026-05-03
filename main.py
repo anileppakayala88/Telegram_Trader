@@ -26,7 +26,7 @@ async def main():
 
     journal = JournalManager()
     journal.load_state()
-    webhook.load_positions()
+    webhook.load_state()
 
     client = TelegramClient("session_fetch", api_id, api_hash)
     await client.connect()

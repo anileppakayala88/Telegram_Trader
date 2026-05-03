@@ -87,9 +87,9 @@ Journal    Signal Object
 - **Auth:** Session file (`session_fetch.session`) — created once via `auth.py`
 - **Parsing:** Regex only — Claude API (claude-haiku) fallback to be added once API key is available (TODO)
 - **Journal:** Append-only JSONL (`journal/<channel>.jsonl`) — one file per channel
-- **Order execution:** MetaAPI cloud SDK (`metaapi-cloud-sdk`) — Phase 2
+- **Order execution:** MetaTrader5 Python library (`MetaTrader5`) — connects directly to a locally running MT5 terminal (Windows only)
 - **Config:** `python-dotenv` for credentials
-- **pip dependencies:** `telethon`, `python-dotenv`, `metaapi-cloud-sdk`
+- **pip dependencies:** `telethon`, `python-dotenv`, `MetaTrader5`
 
 ---
 
@@ -269,8 +269,9 @@ TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
 TELEGRAM_PHONE=
 ANTHROPIC_API_KEY=       # for LLM-assisted parsing fallback (TODO)
-METAAPI_TOKEN=           # from app.metaapi.cloud/token (Phase 2)
-METAAPI_ACCOUNT_ID=      # MT4/MT5 account ID registered on MetaAPI (Phase 2)
+MT5_LOGIN=               # MT5 account number (Phase 2)
+MT5_PASSWORD=            # MT5 account password (Phase 2)
+MT5_SERVER=              # broker server name shown on MT5 login screen (Phase 2)
 DRY_RUN=true             # set to false to place real orders (Phase 2)
 ```
 
