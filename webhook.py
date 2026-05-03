@@ -26,7 +26,25 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 # ── User-configurable ──────────────────────────────────────────────────────────
-ENTRY_TOLERANCE_PIPS = 3        # pips from signal price that still qualifies as market order
+# Pips from signal price that still qualifies as a market order, per instrument.
+# Tighter for stable forex; wider for volatile crypto/indices.
+ENTRY_TOLERANCE_PIPS: dict[str, float] = {
+    # Forex majors / minors — 3 pips
+    "EURUSD": 3, "GBPUSD": 3, "AUDUSD": 3, "NZDUSD": 3,
+    "USDCAD": 3, "USDCHF": 3, "USDJPY": 3,
+    "EURGBP": 3, "EURJPY": 3, "EURCAD": 3, "EURCHF": 3,
+    "EURAUD": 3, "EURNZD": 3, "GBPJPY": 3, "GBPAUD": 3,
+    "GBPCAD": 3, "GBPCHF": 3, "GBPNZD": 3, "AUDJPY": 3,
+    "AUDNZD": 3, "AUDCAD": 3, "AUDCHF": 3, "NZDJPY": 3,
+    "CADJPY": 3, "CADCHF": 3, "CHFJPY": 3,
+    # Commodities — wider due to spread + volatility
+    "XAUUSD": 5, "XAGUSD": 5,
+    # Indices
+    "NAS100": 10, "US30": 10, "SPX500": 5,
+    # Crypto — very wide; 30-pt swings are noise
+    "BTCUSD": 50, "ETHUSD": 20,
+}
+_DEFAULT_TOLERANCE_PIPS = 3     # fallback for any symbol not listed above
 
 PIP_SIZE: dict[str, float] = {  # price value of 1 pip per instrument
     # Majors
@@ -157,9 +175,12 @@ def _resolve_thrilokh(signal: dict) -> tuple[int, int, float]:
     signal_entry = signal["entry"]
     instrument   = signal["instrument"]
     symbol       = SYMBOL_MAP.get(instrument, instrument)
-    tolerance    = ENTRY_TOLERANCE_PIPS * PIP_SIZE.get(instrument, 0.0001)
+    tol_pips  = ENTRY_TOLERANCE_PIPS.get(instrument, _DEFAULT_TOLERANCE_PIPS)
+    tolerance = tol_pips * PIP_SIZE.get(instrument, 0.0001)
 
-    tick    = mt5.symbol_info_tick(symbol)
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError(f"No tick data for {symbol} — is the symbol subscribed in MT5?")
     current = tick.ask if direction == "BUY" else tick.bid
     diff    = current - signal_entry
 

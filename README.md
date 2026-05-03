@@ -154,17 +154,31 @@ TP 4720
 
 ### Vip Thrilokh — dynamic order type
 
-The bot fetches the live market price when a signal arrives and compares it to the signal price:
+The bot fetches the live market price when a signal arrives and compares it to the signal entry price:
 
-| Condition | Order type |
+| Condition | Order placed |
 |---|---|
-| Price within 3 pips of signal | Market order |
-| BUY signal, price above entry | Buy Limit — wait for pullback |
-| BUY signal, price below entry | Buy Stop — enter when price rises to signal level |
-| SELL signal, price below entry | Sell Limit — wait for pullback up |
-| SELL signal, price above entry | Sell Stop — enter when price drops to signal level |
+| Price within tolerance of signal | Market order at live price |
+| BUY signal, price **above** entry | Buy Limit at signal entry — waits for pullback down |
+| BUY signal, price **below** entry | Buy Stop at signal entry — enters when price rises up |
+| SELL signal, price **below** entry | Sell Limit at signal entry — waits for bounce back up |
+| SELL signal, price **above** entry | Sell Stop at signal entry — enters when price drops down |
 
-The pip tolerance (default 3) and pip size per instrument are configurable at the top of `webhook.py`.
+**Tolerance is per-symbol** (configured in `ENTRY_TOLERANCE_PIPS` dict in `webhook.py`):
+
+| Instrument | Tolerance | $ value at 0.01 lot |
+|---|---|---|
+| Forex (all pairs) | 3 pips | ~$0.30 |
+| XAUUSD / XAGUSD | 5 pips | ~$0.50 |
+| NAS100 / US30 | 10 pips | ~$1.00 |
+| SPX500 | 5 pips | ~$0.125 |
+| BTCUSD | 50 pips | ~$5.00 |
+| ETHUSD | 20 pips | ~$0.20 |
+
+**Example (BUY XAUUSD, entry $2000, tolerance $0.50):**
+- Live ask $2000.30 → Market order (within tolerance)
+- Live ask $2001.80 → Buy Limit at $2000 (price ran above entry, wait for pullback)
+- Live ask $1998.00 → Buy Stop at $2000 (price hasn't reached entry yet, enter on rise)
 
 ### XAUUSD BIG LOTS — explicit order type
 
@@ -255,7 +269,7 @@ Set `DRY_RUN=true` in `.env`. Every `place_order` and `handle_close` call will l
 
 | Variable | Default | Description |
 |---|---|---|
-| `ENTRY_TOLERANCE_PIPS` | `3` | Max pips from signal price to still use a market order |
+| `ENTRY_TOLERANCE_PIPS` | per-symbol dict | Max pips from signal price to still use a market order — forex=3, gold=5, NAS100/US30=10, BTC=50 |
 | `PIP_SIZE` | per instrument | Price value of 1 pip — adjust if broker quotes differently |
 | `LOT_SIZE` | `0.01` | Lot size per trade |
 | `SYMBOL_MAP` | standard names | Maps signal instrument names to broker-specific MT5 symbol names (some brokers add suffixes like `.a`, `#`, `.cash`) |

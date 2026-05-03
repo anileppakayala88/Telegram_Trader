@@ -301,10 +301,31 @@ DRY_RUN=true             # set to false to place real orders (Phase 2)
 
 ### Vip Thrilokh (dynamic — based on live price vs signal price)
 
-```
-tolerance = ENTRY_TOLERANCE_PIPS × PIP_SIZE[instrument]
+Tolerance is **per-symbol** (defined in `ENTRY_TOLERANCE_PIPS` dict in `webhook.py`):
 
-|current - signal_entry| ≤ tolerance  →  Market order (enter now)
+| Asset class | Tolerance | Rationale |
+|---|---|---|
+| Forex majors/minors | 3 pips | Tight spreads, stable price action |
+| XAUUSD / XAGUSD | 5 pips | Wider spread + volatility |
+| NAS100 / US30 | 10 pips | Index volatility |
+| SPX500 | 5 pips | Less volatile than NAS/DOW |
+| BTCUSD | 50 pips | 30-point swings are noise |
+| ETHUSD | 20 pips | Less volatile than BTC |
+
+Dollar value of tolerance at 0.01 lot (micro lot):
+
+| Instrument | Tolerance | $ value |
+|---|---|---|
+| Forex (e.g. EURUSD) | 3 pips | ~$0.30 |
+| XAUUSD | 5 pips | ~$0.50 |
+| NAS100 | 10 pips | ~$1.00 |
+| BTCUSD | 50 pips | ~$5.00 |
+
+Decision tree:
+```
+tolerance = ENTRY_TOLERANCE_PIPS[instrument] × PIP_SIZE[instrument]
+
+|current - signal_entry| ≤ tolerance  →  Market order at live price
 
 BUY signal:
   current > entry + tolerance  →  BUY_LIMIT  (price ran up; wait for pullback to signal level)
@@ -314,6 +335,19 @@ SELL signal:
   current < entry - tolerance  →  SELL_LIMIT (price dropped; wait for pullback up to entry)
   current > entry + tolerance  →  SELL_STOP  (price hasn't dropped to entry; enter on fall)
 ```
+
+Example — BUY signal XAUUSD entry $2000, tolerance $0.50:
+- Live ask $2000.30 → Market order (within tolerance)
+- Live ask $2001.80 → BUY LIMIT at $2000 (price ran above entry, wait for pullback)
+- Live ask $1998.00 → BUY STOP  at $2000 (price below entry, enter when it rises)
+
+Example — SELL signal XAUUSD entry $2000, tolerance $0.50:
+- Live bid $1999.80 → Market order (within tolerance)
+- Live bid $1998.20 → SELL LIMIT at $2000 (price fell below entry, wait for bounce back up)
+- Live bid $2001.80 → SELL STOP  at $2000 (price above entry, enter when it drops)
+
+LIMIT = "enter at a better price than now" (pending below market for BUY, above market for SELL)
+STOP  = "enter when price confirms the move by reaching my level"
 
 ### XAUUSD VIP BIG LOTS (explicit — from signal text)
 
