@@ -60,11 +60,15 @@ Telegram_Trader/
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Run the setup script (Windows)
 
-```bash
-pip install -r requirements.txt
+```bat
+setup.bat
 ```
+
+This will:
+- Install all Python dependencies (`pip install -r requirements.txt`)
+- Check if MetaTrader 5 terminal is installed — if not, downloads and installs it silently from MetaQuotes
 
 ### 2. Create `.env`
 
