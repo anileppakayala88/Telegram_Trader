@@ -22,16 +22,27 @@ log = logging.getLogger(__name__)
 
 
 def register_handlers(client, journal):
-    @client.on(events.NewMessage(chats=list(CHANNEL_PARSERS.keys())))
+    @client.on(events.NewMessage(chats=list(CHANNEL_PARSERS.keys()), incoming=True, outgoing=True))
     async def handle_message(event):
-        channel_id = event.chat_id
+        raw_chat_id = event.chat_id
+        # Telethon returns marked IDs: channels as -100XXXXXXXXXX, groups as -XXXXXXX
+        # Normalize back to the raw positive ID used in CHANNEL_PARSERS
+        if raw_chat_id <= -1_000_000_000_000:
+            channel_id = abs(raw_chat_id) - 1_000_000_000_000
+        elif raw_chat_id < 0:
+            channel_id = abs(raw_chat_id)
+        else:
+            channel_id = raw_chat_id
+        log.debug(f"Message received: raw_chat_id={raw_chat_id} normalized={channel_id} msg_id={event.message.id}")
         parser = CHANNEL_PARSERS.get(channel_id)
         if not parser:
+            log.warning(f"No parser for channel_id={channel_id} (raw={raw_chat_id})")
             return
 
         msg = event.message
         try:
             msg_type = parser.classify(msg)
+            log.info(f"[{parser.CHANNEL_NAME}] classify={msg_type} msg_id={msg.id} text={repr((msg.text or '')[:80])}")
 
             if msg_type == "noise":
                 return

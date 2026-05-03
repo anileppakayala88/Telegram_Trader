@@ -237,19 +237,19 @@ def _place_order_sync(signal: dict) -> None:
             "volume":       LOT_SIZE,
             "type":         mt5_type,
             "price":        price,
-            "comment":      signal_id[:31],  # MT5 comment field max 31 chars
             "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": filling,
         }
         if sl  is not None: request["sl"] = sl
         if tp1 is not None: request["tp"] = tp1
 
-        log.info(f"Sending order: {instrument} {signal['direction']} @ {price} SL={sl} TP={tp1}")
+        log.info(f"Sending order: {instrument} {signal['direction']} @ {price} SL={sl} TP={tp1} request={request}")
         result = mt5.order_send(request)
 
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            err = result.comment if result else mt5.last_error()
-            log.error(f"order_send failed ({err}): {instrument} {signal['direction']}")
+            retcode = result.retcode if result else None
+            err     = result.comment if result else mt5.last_error()
+            log.error(f"order_send failed retcode={retcode} err={err}: {instrument} {signal['direction']}")
             return
 
         _open[signal_id] = result.order

@@ -18,10 +18,11 @@ Telegram channels (Vip Thrilokh, XAUUSD VIP BIG LOTS)
            │                 │
       journal/             webhook.py
    <channel>.jsonl          │
-  (append-only log)    MetaAPI cloud
+  (append-only log)    MetaTrader5 Python library
                             │
-                      MT4/MT5 broker account
-                      (prop firm — no local terminal needed)
+                      MT5 terminal (running locally, Windows)
+                            │
+                      Broker account (Exness)
 ```
 
 Every message goes through three steps:
@@ -113,7 +114,7 @@ python main.py
 
 ### Vip Thrilokh
 
-Minimal 3-line format. Direction is inferred from SL position when not stated explicitly. Leading emojis before the instrument line are handled transparently.
+Minimal 3-line format. Direction is inferred from SL position when not stated explicitly. Leading emojis before the instrument line are handled transparently. Direction keyword can appear before or after the instrument name.
 
 ```
 Btc @ 74220
@@ -124,11 +125,16 @@ Tp. @ 70450
 ```
 Buy xauusd @ 4674
 Sl @ 4660
-Tp1 @ 4688
-Tp2 @ 4706
+Tp @ 4688
 ```
 
-**Direction rule:** `SL > Entry → SELL`, `SL < Entry → BUY`
+```
+BTCUSD SELL 78702
+SL 79000
+TP 78473
+```
+
+**Direction rule:** `SL > Entry → SELL`, `SL < Entry → BUY` (when direction keyword absent)
 
 ### XAUUSD VIP BIG LOTS
 
@@ -271,6 +277,6 @@ Set `DRY_RUN=true` in `.env`. Every `place_order` and `handle_close` call will l
 | Phase | Status | Description |
 |---|---|---|
 | Phase 1 | Complete | Signal reader, parser, journal |
-| Phase 2 | In progress | MT5 direct order execution — market / limit / stop orders, TP1, full close |
+| Phase 2 | Complete | MT5 direct order execution — market / limit / stop orders, TP1, full close / cancel |
 | Phase 2.1 | Planned | Multiple TP splitting, partial closes, breakeven SL moves |
 | Phase 3 | Future | LLM fallback parser (Claude Haiku) for edge-case messages |

@@ -23,8 +23,8 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
 - Write parsed signal to a trade journal (human-readable log)
 - Flag unparseable messages for manual review
 
-### Phase 2 — MetaAPI Order Execution (current)
-- Connect to broker MT4/MT5 account via MetaAPI cloud bridge (no local terminal)
+### Phase 2 — MT5 Direct Order Execution (complete)
+- Connect to locally running MT5 terminal via MetaTrader5 Python library (Windows only)
 - On new_signal: determine order type from live price vs signal price, place order with SL + TP1
 - On exit update: close open position or cancel pending order automatically
 - Persist open position/order IDs to disk so restarts don't lose track of live trades
@@ -35,9 +35,8 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
 - Auto partial-close when channel sends "close partials"
 - Move SL to breakeven after partial close
 
-### Phase 3 — MT5 Direct (future consideration)
-- Optionally route orders directly to MT5 via Python MT5 library
-- Not in scope until Phase 2 is validated
+### Phase 3 — LLM fallback parser (future)
+- Add Claude Haiku fallback for messages that don't match the regex parser
 
 ---
 
@@ -63,9 +62,11 @@ Journal    Signal Object
                 |
          [Phase 2] webhook.py
                 |
-         MetaAPI cloud bridge
+         MetaTrader5 Python library
                 |
-         MT4/MT5 broker account
+         MT5 terminal (local, Windows)
+                |
+         Broker account (Exness)
 ```
 
 ---
@@ -142,8 +143,9 @@ Telegram_Trader/
 |----------------------|--------------|------------- |------------------------------------|
 | Vip Thrilokh         | 2133117224   | no-username  | Multi-asset (BTC, Forex, NQ)       |
 | XAUUSD VIP BIG LOTS  | 1481325093   | no-username  | XAUUSD only                        |
+| Test_TV_3min         | 2540865305   | no-username  | Dev/test — uses Vip Thrilokh parser |
 
-Access channels by **numeric ID** (no username available for either).
+Access channels by **numeric ID** (no username available for any).
 
 ---
 
@@ -281,12 +283,15 @@ DRY_RUN=true             # set to false to place real orders (Phase 2)
 
 - **User account over bot:** Bots cannot read channel history and require admin access. User account via Telethon reads any channel the account is a member of.
 - **Channel-aware parsing:** Each channel has its own parser profile. A message from Channel 1 is never parsed with Channel 2's rules.
-- **Direction inference (Channel 1):** No direction keyword in messages — inferred by comparing SL vs Entry price.
+- **Direction inference (Channel 1):** No direction keyword in messages — inferred by comparing SL vs Entry price. Direction keyword can also appear after the instrument name (e.g. `BTCUSD SELL 78702`).
 - **LLM fallback:** Regex handles the known clean formats; Claude Haiku handles edge cases and new patterns cheaply.
 - **Message classification first:** Every incoming message is classified (new_signal / trade_update / noise) before parsing. Only `new_signal` messages proceed to full parsing.
 - **JSONL journal:** Append-only, easy to tail/grep, survives crashes without corruption.
 - **Async throughout:** Telethon is async; keep the whole stack async to avoid blocking the listener.
-- **MetaAPI over local MT5:** Broker account is on a prop firm that uses MT5. MetaAPI provides a cloud bridge so no local MT5 terminal is required.
+- **MT5 Python library direct:** Orders are placed via the `MetaTrader5` Python library connecting to a locally running MT5 terminal (Windows only). No MetaAPI cloud bridge needed.
+- **MT5 order_send — no `comment` field:** The MetaTrader5 Python library rejects any `comment` key in the order request dict (returns error -2 even for an empty string). The `comment` key must be omitted entirely.
+- **Telethon marked IDs:** `event.chat_id` returns negative marked IDs (e.g. `-1002540865305` for channel `2540865305`). `listener.py` normalises these back to raw positive IDs before looking up the parser.
+- **outgoing=True on NewMessage:** When testing with own account messages, Telethon's `NewMessage` handler must include `outgoing=True` — by default it only fires for incoming messages.
 - **create_task for orders:** Order execution is fired as an asyncio task so it never blocks the Telegram listener from receiving the next message.
 - **DRY_RUN default true:** Orders are logged but never sent until DRY_RUN is explicitly set to false in .env — prevents accidental live trading during development.
 

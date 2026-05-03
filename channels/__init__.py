@@ -10,4 +10,5 @@ from channels import vip_thrilokh, xauusd_big_lots
 CHANNEL_PARSERS = {
     2133117224: vip_thrilokh,
     1481325093: xauusd_big_lots,
+    2540865305: vip_thrilokh,   # Test_TV_3min — uses Vip Thrilokh parser format
 }

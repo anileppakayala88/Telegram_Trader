@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("test_replay")
 
-LIMIT = 50  # messages per channel to replay
+LIMIT = 100  # messages per channel to replay
 
 
 async def replay():

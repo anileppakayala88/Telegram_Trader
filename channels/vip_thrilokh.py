@@ -65,8 +65,9 @@ _ASSET_CLASS = {
 #   "Sell nq @ 26678\nSl @ 26744\nTp @ 26400"
 #   "Usdjpy 159.390\nSl 159.602\nTp 158.552"
 #   "Sell Usdchf  0.78436\nSl 0.78641\nTp @ 0.77928"
+#   "BTCUSD SELL 78702\nSL 79000\nTP 78473"  (direction after instrument)
 _SIGNAL_RE = re.compile(
-    r"^\W*(?:(buy|sell)[ \t]+)?(\w+)[ \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
+    r"^\W*(?:(buy|sell)[ \t]+)?(\w+)(?:[ \t]+(buy|sell))?[ \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
     r"[ \t]*sl\d*[. \t]+@?[ \t]*([\d.]+)[ \t]*\r?\n"
     r"[ \t]*tp\d*[. \t]+@?[ \t]*([\d.]+)",
     re.IGNORECASE | re.MULTILINE,
@@ -75,8 +76,9 @@ _SIGNAL_RE = re.compile(
 # Ordered by severity — first match wins
 _UPDATE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\ball\s+tp\s+hit|all\s+tp\s+hitted",   re.I),       "full_close"),
-    (re.compile(r"\bclosing\s+this\b|\bclose\s+(here|full)\b", re.I), "full_close"),
+    (re.compile(r"\bclosing\s+this\b|\bclose\s+(here|full|now|trade)\b", re.I), "full_close"),
     (re.compile(r"\bclose\s+partials?\b",                 re.I),       "partial_close"),
+    (re.compile(r"^close$",                               re.I),       "full_close"),
     (re.compile(r"\bsl\s+(as\s+)?be\b|\bset\s+be\b",     re.I),       "breakeven"),
     (re.compile(r"\btapped\b"
                 r"|\btp\s*\d*\s+hitted?\b"   # "Tp1 hitted", "Tp 1 hitted"
@@ -130,12 +132,13 @@ def parse_signal(msg) -> dict | None:
     if not m:
         return None
 
-    direction_raw, instrument_raw, entry_raw, sl_raw, tp_raw = m.groups()
+    dir_before, instrument_raw, dir_after, entry_raw, sl_raw, tp_raw = m.groups()
     instrument = _normalise(instrument_raw)
     entry = float(entry_raw)
     sl    = float(sl_raw)
     tp    = float(tp_raw)
 
+    direction_raw = dir_before or dir_after
     if direction_raw:
         direction = direction_raw.upper()
     else:
