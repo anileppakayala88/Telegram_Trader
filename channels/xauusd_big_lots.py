@@ -6,9 +6,9 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 CHANNEL_NAME = "XAUUSD VIP BIG LOTS"
 CHANNEL_ID = 1481325093
 
-# Matches: "XAUUSD Buy limit 4664/4656" or "XAUUSD Sell limit 4693/4705"
+# Matches: "XAUUSD Buy limit 4664/4656", "GOLD Buy limit 4664/4656", etc.
 _SIGNAL_RE = re.compile(
-    r"^XAUUSD[ \t]+(buy|sell)[ \t]+(limit|market)?[ \t]*([\d.]+)(?:/([\d.]+))?",
+    r"^(?:XAUUSD|GOLD)[ \t]+(buy|sell)[ \t]+(limit|market)?[ \t]*([\d.]+)(?:/([\d.]+))?",
     re.IGNORECASE,
 )
 _SL_RE = re.compile(r"^sl[ \t]+([\d.]+)", re.IGNORECASE)
