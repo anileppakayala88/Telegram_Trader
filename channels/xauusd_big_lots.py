@@ -6,9 +6,9 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 CHANNEL_NAME = "XAUUSD VIP BIG LOTS"
 CHANNEL_ID = 1481325093
 
-# Matches: "XAUUSD Buy limit 4664/4656", "GOLD Buy limit 4664/4656", etc.
+# Matches: "XAUUSD Buy limit 4664/4656", "GOLD Buy from 4606/4598", etc.
 _SIGNAL_RE = re.compile(
-    r"^(?:XAUUSD|GOLD)[ \t]+(buy|sell)[ \t]+(limit|market)?[ \t]*([\d.]+)(?:/([\d.]+))?",
+    r"^(?:XAUUSD|GOLD)[ \t]+(buy|sell)[ \t]+(limit|market|from)?[ \t]*([\d.]+)(?:/([\d.]+))?",
     re.IGNORECASE,
 )
 _SL_RE = re.compile(r"^sl[ \t]+([\d.]+)", re.IGNORECASE)
@@ -70,7 +70,8 @@ def parse_signal(msg) -> dict | None:
         return None
 
     direction   = m.group(1).upper()
-    order_type  = (m.group(2) or "market").lower()
+    raw_type    = (m.group(2) or "market").lower()
+    order_type  = "market" if raw_type == "from" else raw_type
     price1      = float(m.group(3))
     price2      = float(m.group(4)) if m.group(4) else None
 
