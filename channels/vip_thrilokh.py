@@ -121,6 +121,9 @@ def classify(msg) -> str:
     for pat, _ in _UPDATE_PATTERNS:
         if pat.search(text):
             return "trade_update"
+    import llm_classify
+    if llm_classify.get_update_type(text, CHANNEL_NAME) != "noise":
+        return "trade_update"
     return "noise"
 
 
@@ -169,6 +172,12 @@ def parse_update(msg, signal_id: str | None) -> dict | None:
         if pat.search(text):
             update_type = utype
             break
+
+    if update_type == "commentary":
+        import llm_classify
+        llm_result = llm_classify.get_update_type(text, CHANNEL_NAME)
+        if llm_result not in ("noise", "commentary"):
+            update_type = llm_result
 
     return {
         "signal_id":              signal_id,

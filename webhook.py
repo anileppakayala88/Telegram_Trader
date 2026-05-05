@@ -72,6 +72,16 @@ LOT_SIZE = 0.01                 # lot size per TP order — each TP level gets i
 USE_TP3 = os.getenv("USE_TP3", "false").lower() == "true"
 _MAX_TP_ORDERS = 3 if USE_TP3 else 2
 
+# Place one order per range price (one at each price in the entry range).
+# Each order is paired with a TP level: first range price → TP1, second → TP2.
+# Only applies to XAUUSD VIP BIG LOTS limit orders with a range (e.g. 4583/4590).
+# Set SPLIT_RANGE_ENTRIES=false to use the old behaviour (single entry, one order per TP).
+SPLIT_RANGE_ENTRIES = os.getenv("SPLIT_RANGE_ENTRIES", "true").lower() == "true"
+
+# After TP1 is hit, move the SL of remaining open positions to their fill price (breakeven).
+# Set MOVE_SL_TO_BE_ON_TP1=false to close all remaining positions on tp_hit instead.
+MOVE_SL_TO_BE_ON_TP1 = os.getenv("MOVE_SL_TO_BE_ON_TP1", "true").lower() == "true"
+
 # Broker-specific symbol names — Exness appends 'm' to all symbols
 SYMBOL_MAP: dict[str, str] = {
     # Majors
@@ -191,21 +201,22 @@ def _save() -> None:
 
 # ── Channel-specific entry logic ───────────────────────────────────────────────
 
-def _resolve_thrilokh(signal: dict) -> tuple[int, int, float]:
-    """Decide MT5 order type for Vip Thrilokh signals by comparing live price
-    to signal entry price. Returns (action, mt5_order_type, price)."""
-    direction    = signal["direction"]
-    signal_entry = signal["entry"]
-    instrument   = signal["instrument"]
-    symbol       = SYMBOL_MAP.get(instrument, instrument)
-    tol_pips     = ENTRY_TOLERANCE_PIPS.get(instrument, _DEFAULT_TOLERANCE_PIPS)
-    tolerance    = tol_pips * PIP_SIZE.get(instrument, 0.0001)
+def _resolve_order_type(direction: str, instrument: str, symbol: str, entry_price: float) -> tuple[int, int, float]:
+    """Determine MT5 action, order type, and execution price by comparing the
+    live market price to a signal entry price.
+
+    Returns (action, mt5_order_type, price):
+      - market order if within tolerance  → price is current bid/ask
+      - pending limit/stop otherwise      → price is the signal entry
+    """
+    tol_pips  = ENTRY_TOLERANCE_PIPS.get(instrument, _DEFAULT_TOLERANCE_PIPS)
+    tolerance = tol_pips * PIP_SIZE.get(instrument, 0.0001)
 
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         raise RuntimeError(f"No tick data for {symbol} — is the symbol subscribed in MT5?")
     current = tick.ask if direction == "BUY" else tick.bid
-    diff    = current - signal_entry
+    diff    = current - entry_price
 
     if abs(diff) <= tolerance:
         mt5_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
@@ -215,27 +226,45 @@ def _resolve_thrilokh(signal: dict) -> tuple[int, int, float]:
         mt5_type = mt5.ORDER_TYPE_BUY_LIMIT if diff > 0 else mt5.ORDER_TYPE_BUY_STOP
     else:
         mt5_type = mt5.ORDER_TYPE_SELL_LIMIT if diff < 0 else mt5.ORDER_TYPE_SELL_STOP
-    return mt5.TRADE_ACTION_PENDING, mt5_type, signal_entry
+    return mt5.TRADE_ACTION_PENDING, mt5_type, entry_price
 
 
-def _resolve_xauusd(signal: dict) -> tuple[int, int, float]:
-    """Resolve MT5 order type for XAUUSD VIP BIG LOTS signals.
-    Order type is explicit in the signal text. Returns (action, mt5_order_type, price)."""
+def _resolve_thrilokh(signal: dict) -> tuple[int, int, float]:
+    """Decide MT5 order type for Vip Thrilokh signals. Returns (action, mt5_order_type, price)."""
+    instrument = signal["instrument"]
+    return _resolve_order_type(
+        signal["direction"],
+        instrument,
+        SYMBOL_MAP.get(instrument, instrument),
+        signal["entry"],
+    )
+
+
+def _resolve_xauusd(signal: dict) -> list[tuple[int, int, float]]:
+    """Resolve MT5 order types for XAUUSD VIP BIG LOTS signals.
+
+    Uses live price comparison (same logic as Vip Thrilokh) to determine the
+    actual order type for each entry price — ignoring the explicit type in the
+    signal text. Each entry price independently resolves to market, limit, or stop.
+
+    With SPLIT_RANGE_ENTRIES and a range, returns two tuples (one per price):
+      BUY  range → [hi, lo]  — hi fills first as price drops into the range
+      SELL range → [lo, hi]  — lo fills first as price rises into the range
+    """
     direction  = signal["direction"]
-    order_type = signal.get("order_type", "market").lower()
+    instrument = signal["instrument"]
+    symbol     = SYMBOL_MAP.get(instrument, instrument)
 
-    if signal.get("entry_range"):
+    if signal.get("entry_range") and SPLIT_RANGE_ENTRIES:
         lo, hi = signal["entry_range"]
-        price  = hi if direction == "BUY" else lo
+        entry_prices = [hi, lo] if direction == "BUY" else [lo, hi]
+    elif signal.get("entry_range"):
+        lo, hi = signal["entry_range"]
+        entry_prices = [hi if direction == "BUY" else lo]
     else:
-        price = signal["entry"]
+        entry_prices = [signal["entry"]]
 
-    if order_type == "limit":
-        mt5_type = mt5.ORDER_TYPE_BUY_LIMIT if direction == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
-        return mt5.TRADE_ACTION_PENDING, mt5_type, price
-
-    mt5_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
-    return mt5.TRADE_ACTION_DEAL, mt5_type, price
+    return [_resolve_order_type(direction, instrument, symbol, p) for p in entry_prices]
 
 
 # ── Order placement ────────────────────────────────────────────────────────────
@@ -263,10 +292,18 @@ def _place_order_sync(signal: dict) -> None:
     tp_levels = tps[:_MAX_TP_ORDERS]
 
     if DRY_RUN:
-        for i, tp in enumerate(tp_levels, 1):
+        # No MT5 connection in dry-run — show signal entry prices only (type resolved at live execution)
+        if channel_id == 1481325093 and signal.get("entry_range") and SPLIT_RANGE_ENTRIES:
+            lo, hi = signal["entry_range"]
+            prices = [hi, lo] if signal["direction"] == "BUY" else [lo, hi]
+            # Each entry price paired with its own TP; same zip logic as live path
+            dry_pairs = list(zip(prices, tp_levels))
+        else:
+            dry_pairs = [(signal["entry"], tp) for tp in tp_levels]
+        for i, (price, tp) in enumerate(dry_pairs, 1):
             log.info(
-                f"[DRY RUN] place_order TP{i}/{len(tp_levels)} — "
-                f"{signal['direction']} {instrument} SL={sl} TP={tp} signal_id={signal_id}"
+                f"[DRY RUN] place_order TP{i}/{len(dry_pairs)} — "
+                f"{signal['direction']} {instrument} @ {price} SL={sl} TP={tp} signal_id={signal_id}"
             )
         return
 
@@ -274,32 +311,37 @@ def _place_order_sync(signal: dict) -> None:
         return
 
     try:
-        if channel_id == 2133117224:    # Vip Thrilokh
-            action, mt5_type, price = _resolve_thrilokh(signal)
-        elif channel_id == 1481325093:  # XAUUSD VIP BIG LOTS
-            action, mt5_type, price = _resolve_xauusd(signal)
+        if channel_id == 2133117224:    # Vip Thrilokh — single entry, one order per TP
+            spec   = _resolve_thrilokh(signal)
+            orders_tps = [(spec, tp) for tp in tp_levels]
+        elif channel_id == 1481325093:  # XAUUSD VIP BIG LOTS — live-price resolution per entry
+            specs  = _resolve_xauusd(signal)   # list of (action, mt5_type, price)
+            if len(specs) == 1:
+                # Single entry — replicate for each TP level (same as Thrilokh)
+                orders_tps = [(specs[0], tp) for tp in tp_levels]
+            else:
+                # Split range — each entry price paired with its own TP level
+                orders_tps = list(zip(specs, tp_levels))
         else:
             log.warning(f"place_order: no order logic for channel {channel_id}")
             return
 
-        # Market orders use IOC; pending orders use RETURN (partial fill allowed)
-        filling = mt5.ORDER_FILLING_IOC if action == mt5.TRADE_ACTION_DEAL else mt5.ORDER_FILLING_RETURN
-
         tickets = []
-        for i, tp in enumerate(tp_levels, 1):
+        for i, ((action, mt5_type, price), tp) in enumerate(orders_tps, 1):
+            # Market orders use IOC; pending orders use RETURN (partial fill allowed)
+            filling = mt5.ORDER_FILLING_IOC if action == mt5.TRADE_ACTION_DEAL else mt5.ORDER_FILLING_RETURN
             request: dict = {
                 "action":       action,
                 "symbol":       symbol,
                 "volume":       LOT_SIZE,
                 "type":         mt5_type,
                 "price":        price,
+                "sl":           sl,
+                "tp":           tp,
                 "type_time":    mt5.ORDER_TIME_GTC,
                 "type_filling": filling,
             }
-            request["sl"] = sl
-            request["tp"] = tp
-
-            log.info(f"Sending TP{i} order: {instrument} {signal['direction']} @ {price} SL={sl} TP={tp}")
+            log.info(f"Sending TP{i}/{len(orders_tps)} order: {instrument} {signal['direction']} @ {price} SL={sl} TP={tp}")
             result = mt5.order_send(request)
 
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
@@ -314,10 +356,77 @@ def _place_order_sync(signal: dict) -> None:
         if tickets:
             _open[signal_id] = tickets
             _save()
-            log.info(f"Signal {signal_id}: {len(tickets)}/{len(tp_levels)} orders placed — tickets={tickets}")
+            log.info(f"Signal {signal_id}: {len(tickets)}/{len(orders_tps)} orders placed — tickets={tickets}")
 
     except Exception:
         log.exception(f"place_order failed — signal_id={signal_id}")
+
+
+# ── TP1 hit — move remaining positions to breakeven ───────────────────────────
+
+async def handle_tp_hit(signal_id: str) -> None:
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _handle_tp_hit_sync, signal_id)
+
+
+def _handle_tp_hit_sync(signal_id: str) -> None:
+    if DRY_RUN:
+        log.info(f"[DRY RUN] handle_tp_hit — signal_id={signal_id}")
+        return
+
+    if not MOVE_SL_TO_BE_ON_TP1:
+        # Fallback: close all remaining positions (original tp_hit behaviour)
+        _handle_close_sync(signal_id)
+        return
+
+    tickets = _open.get(signal_id)
+    if not tickets:
+        log.warning(f"handle_tp_hit: no tracked tickets for signal_id={signal_id}")
+        return
+
+    if not _connect():
+        return
+
+    try:
+        remaining = []
+        for ticket in list(tickets):
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                pos = positions[0]
+                result = mt5.order_send({
+                    "action":   mt5.TRADE_ACTION_SLTP,
+                    "position": pos.ticket,
+                    "sl":       pos.price_open,
+                    "tp":       pos.tp,
+                })
+                if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                    err = result.comment if result else mt5.last_error()
+                    log.error(f"Move SL to BE failed ({err}): ticket={ticket}")
+                else:
+                    log.info(f"SL moved to BE ({pos.price_open}): ticket={ticket} signal_id={signal_id}")
+                remaining.append(ticket)
+            else:
+                orders = mt5.orders_get(ticket=ticket)
+                if orders:
+                    # Pending order never filled — cancel it
+                    result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                        err = result.comment if result else mt5.last_error()
+                        log.error(f"Cancel pending on tp_hit failed ({err}): ticket={ticket}")
+                    else:
+                        log.info(f"Pending order cancelled on tp_hit: ticket={ticket} signal_id={signal_id}")
+                else:
+                    # Already auto-closed by MT5 when its TP was reached
+                    log.info(f"Ticket {ticket} closed by MT5 (TP reached): signal_id={signal_id}")
+
+        if remaining:
+            _open[signal_id] = remaining
+        else:
+            _open.pop(signal_id, None)
+        _save()
+
+    except Exception:
+        log.exception(f"handle_tp_hit failed — signal_id={signal_id}")
 
 
 # ── Close / cancel ─────────────────────────────────────────────────────────────

@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import sys
+import time
 from telethon import TelegramClient
 from dotenv import load_dotenv
 from journal import JournalManager
@@ -9,6 +11,33 @@ from channels import CHANNEL_PARSERS
 import webhook
 
 load_dotenv()
+
+_PID_FILE = os.path.join(os.path.dirname(__file__), "bot.pid")
+
+
+def _check_pid_lock():
+    if os.path.exists(_PID_FILE):
+        try:
+            with open(_PID_FILE) as f:
+                old_pid = int(f.read().strip())
+            # Check if that PID is still alive
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x0400, False, old_pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                print(f"Bot already running (PID {old_pid}). Exiting.")
+                sys.exit(0)
+        except Exception:
+            pass  # stale pid file — safe to overwrite
+    with open(_PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _remove_pid_lock():
+    try:
+        os.remove(_PID_FILE)
+    except FileNotFoundError:
+        pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,4 +83,17 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _check_pid_lock()
+    try:
+        while True:
+            try:
+                asyncio.run(main())
+                log.warning("run_until_disconnected returned — restarting in 30s...")
+            except KeyboardInterrupt:
+                log.info("Shutting down.")
+                break
+            except Exception as e:
+                log.error(f"Bot crashed: {e}. Restarting in 30s...")
+            time.sleep(30)
+    finally:
+        _remove_pid_lock()

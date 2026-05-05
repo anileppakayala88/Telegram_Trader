@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem*)",
+      "PowerShell(Get-Command*)",
+      "PowerShell(Test-Path*)"
+    ]
+  }
+}

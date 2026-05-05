@@ -75,14 +75,11 @@ def register_handlers(client, journal):
                     f"[{parser.CHANNEL_NAME}] UPDATE {entry['update_type']} "
                     f"→ signal_id={signal_id or 'unlinked'}"
                 )
-                # These four update types all mean the trade is done:
-                #   full_close  — channel closed the trade manually
-                #   sl_hit      — stop loss was triggered
-                #   cancelled   — entry limit/stop order was never filled
-                #   tp_hit      — TP1 reached; for pending orders this also means
-                #                 price blew through entry without filling us
-                if entry["update_type"] in ("full_close", "sl_hit", "cancelled", "tp_hit") and signal_id:
+                if entry["update_type"] in ("full_close", "sl_hit", "cancelled") and signal_id:
                     asyncio.create_task(webhook.handle_close(signal_id))
+                elif entry["update_type"] == "tp_hit" and signal_id:
+                    # Move remaining positions to breakeven (or close all if MOVE_SL_TO_BE_ON_TP1=false)
+                    asyncio.create_task(webhook.handle_tp_hit(signal_id))
 
         except Exception:
             log.exception(f"[{parser.CHANNEL_NAME}] Error processing msg_id={msg.id}")

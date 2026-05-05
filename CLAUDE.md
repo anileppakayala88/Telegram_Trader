@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Reads trade signal messages from a Telegram channel/group, parses them into structured trade objects, logs them to a human-readable journal, and fires orders to a live broker via MetaAPI (Phase 2).
+Reads trade signal messages from a Telegram channel/group, parses them into structured trade objects, logs them to a human-readable journal, and fires orders to a live broker via the MetaTrader5 Python library (Phase 2).
 
 ---
 
@@ -25,18 +25,22 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
 
 ### Phase 2 — MT5 Direct Order Execution (complete)
 - Connect to locally running MT5 terminal via MetaTrader5 Python library (Windows only)
-- On new_signal: determine order type from live price vs signal price, place order with SL + TP1
+- On new_signal: determine order type from live price vs signal price, place one order per TP level (SL shared)
 - On exit update: close open position or cancel pending order automatically
 - Persist open position/order IDs to disk so restarts don't lose track of live trades
 - DRY_RUN mode for safe testing without real order execution
 
-### Phase 2.1 — Multiple TPs + Partial Closes (deferred)
-- Split position across TP1 / TP2 / TP3
-- Auto partial-close when channel sends "close partials"
-- Move SL to breakeven after partial close
+### Phase 2.1 — Multiple TPs + Split Range Entries (complete)
+- Place one order per TP level (TP1 + TP2 always; TP3 optional via USE_TP3 flag)
+- Each order gets its own lot size (LOT_SIZE) and its own TP target
+- XAUUSD BIG LOTS range entries: one order per entry price, paired with successive TP levels (SPLIT_RANGE_ENTRIES)
+- Move SL to breakeven when TP1 is hit (MOVE_SL_TO_BE_ON_TP1); or close all remaining positions
+- Auto partial-close on "close partials" channel message: not yet implemented
 
-### Phase 3 — LLM fallback parser (future)
-- Add Claude Haiku fallback for messages that don't match the regex parser
+### Phase 3 — LLM fallback classifier (complete)
+- `llm_classify.py`: Claude Haiku fallback for messages that don't match any regex pattern
+- Cache-backed: normalized message → result stored in `cache/classify_cache.json`
+- Falls back to `"commentary"` when ANTHROPIC_API_KEY is not set
 
 ---
 
@@ -86,11 +90,11 @@ Journal    Signal Object
 - **Language:** Python 3.11+
 - **Telegram:** Telethon (user account MTProto API)
 - **Auth:** Session file (`session_fetch.session`) — created once via `auth.py`
-- **Parsing:** Regex only — Claude API (claude-haiku) fallback to be added once API key is available (TODO)
+- **Parsing:** Regex fast path + Claude Haiku fallback (`llm_classify.py`) for unmatched messages; cache-backed to avoid repeat API calls
 - **Journal:** Append-only JSONL (`journal/<channel>.jsonl`) — one file per channel
 - **Order execution:** MetaTrader5 Python library (`MetaTrader5`) — connects directly to a locally running MT5 terminal (Windows only)
 - **Config:** `python-dotenv` for credentials
-- **pip dependencies:** `telethon`, `python-dotenv`, `MetaTrader5`
+- **pip dependencies:** `telethon`, `python-dotenv`, `MetaTrader5`, `anthropic` (optional — enables LLM fallback)
 
 ---
 
@@ -104,14 +108,16 @@ Telegram_Trader/
 ├── requirements.txt
 ├── auth.py                   # one-time Telegram session auth
 ├── fetch_samples.py          # pull historical messages for offline parser testing
+├── analyze_msgs.py           # fetch last 1000 msgs per channel, classify + display grouped report
 ├── list_channels.py          # list all channels the account is in
 ├── test_replay.py            # replay historical messages through the full pipeline
 ├── generate_viewer.py        # generate journal_viewer.html from journal JSONL files
 ├── journal_viewer_template.html  # HTML template for the journal viewer
-├── main.py                   # entry point — creates client, loads state, starts listener
+├── main.py                   # entry point — restart loop + PID lock + starts listener
 ├── listener.py               # Telethon event handler — routes messages to channel parsers
 ├── journal.py                # JSONL writer + in-memory state manager
-├── webhook.py                # MetaAPI order execution (Phase 2)
+├── webhook.py                # MT5 order execution (Phase 2)
+├── bot.pid                   # PID of running bot — prevents duplicate instances (auto-created)
 ├── channels/
 │   ├── __init__.py           # channel registry: maps channel ID → parser module
 │   ├── vip_thrilokh.py       # parser for Channel 1 (Vip Thrilokh)
@@ -119,7 +125,7 @@ Telegram_Trader/
 └── journal/                  # created at runtime
     ├── vip_thrilokh.jsonl    # append-only signal log for channel 1
     ├── xauusd_big_lots.jsonl # append-only signal log for channel 2
-    └── positions.json        # persisted MetaAPI position/order IDs (Phase 2)
+    └── positions.json        # persisted MT5 position/order IDs (Phase 2)
 ```
 
 ### Adding a New Channel
@@ -207,7 +213,7 @@ Tp. @ 70450
 
 ### Channel 2 — XAUUSD VIP BIG LOTS (ID: 1481325093)
 
-**Signal format:** Explicit direction + order type, multiple TPs, entry can be a range. Parser scans all lines for the XAUUSD signal line so leading emoji lines are handled transparently.
+**Signal format:** Explicit direction + order type, multiple TPs, entry can be a range. Parser scans all lines for the signal line so leading emoji lines are handled transparently.
 
 ```
 XAUUSD Buy limit 4664/4656
@@ -217,11 +223,19 @@ TP 4676
 TP 4720 USE BIG LOTS ✅✔️
 ```
 
-**Direction:** Explicitly stated — `Buy` / `Sell` + order type (`limit` / market implied)
+Also accepted instrument prefix: `GOLD` (alias for XAUUSD). Also accepted order-type keyword: `from` (treated as market order).
+
+```
+GOLD Buy from 4606/4598
+Sl 4585
+TP 4615
+```
+
+**Direction:** Explicitly stated — `Buy` / `Sell` + order type (`limit` / `from` / market implied)
 **Entry:** Single price or range (`4664/4656` — use lower for buy limit, upper for sell limit)
 **TPs:** Multiple (TP1, TP2, TP3) — each on its own line starting with `TP`
 **Images:** Rarely attached
-**Instrument:** XAUUSD only
+**Instrument:** XAUUSD only (sent as `XAUUSD` or `GOLD`)
 
 **Update / management messages (classify as trade_update):**
 - `"XAUUSD TP1 HIT RUNNING X PIPS"` — first TP reached
@@ -270,11 +284,14 @@ TP 4720 USE BIG LOTS ✅✔️
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
 TELEGRAM_PHONE=
-ANTHROPIC_API_KEY=       # for LLM-assisted parsing fallback (TODO)
-MT5_LOGIN=               # MT5 account number (Phase 2)
-MT5_PASSWORD=            # MT5 account password (Phase 2)
-MT5_SERVER=              # broker server name shown on MT5 login screen (Phase 2)
-DRY_RUN=true             # set to false to place real orders (Phase 2)
+ANTHROPIC_API_KEY=            # optional — enables Claude Haiku LLM fallback classifier
+MT5_LOGIN=                    # MT5 account number
+MT5_PASSWORD=                 # MT5 account password
+MT5_SERVER=                   # broker server name shown on MT5 login screen
+DRY_RUN=true                  # set to false to place real orders
+USE_TP3=false                 # set to true to also place a third order targeting TP3
+SPLIT_RANGE_ENTRIES=true      # place one order per entry price in a range (XAUUSD BIG LOTS)
+MOVE_SL_TO_BE_ON_TP1=true     # move remaining positions to breakeven when TP1 is hit
 ```
 
 ---
@@ -294,6 +311,15 @@ DRY_RUN=true             # set to false to place real orders (Phase 2)
 - **outgoing=True on NewMessage:** When testing with own account messages, Telethon's `NewMessage` handler must include `outgoing=True` — by default it only fires for incoming messages.
 - **create_task for orders:** Order execution is fired as an asyncio task so it never blocks the Telegram listener from receiving the next message.
 - **DRY_RUN default true:** Orders are logged but never sent until DRY_RUN is explicitly set to false in .env — prevents accidental live trading during development.
+- **Restart loop in main.py:** `asyncio.run(main())` is wrapped in `while True` — if the bot crashes or disconnects, it logs the error, waits 30s, and restarts automatically. Only `KeyboardInterrupt` breaks the loop.
+- **PID lock file (`bot.pid`):** On startup, `main.py` writes its PID. Any subsequent launch checks if that PID is still alive; if yes, the new instance exits immediately. Prevents multiple instances fighting over the Telethon sqlite session file. PID file is removed on clean exit via `finally`.
+- **Launch with `python.exe` directly:** Always start the bot with the full path to `python.exe` (`C:\Users\avaid\AppData\Local\Programs\Python\Python311\python.exe`), not `py.exe`. Using `py.exe` spawns two processes (launcher + interpreter) which looks like two instances; `python.exe` gives a single process.
+- **GOLD prefix for XAUUSD BIG LOTS:** The channel sometimes sends signals with `GOLD` instead of `XAUUSD` as the instrument prefix. The `_SIGNAL_RE` regex accepts both: `^(?:XAUUSD|GOLD)`.
+- **`from` keyword in XAUUSD BIG LOTS:** Channel sends `GOLD Buy from 4606/4595` — `from` appears where order type would be. Captured as order type group and normalised to `"market"` in `parse_signal`. The parsed `order_type` is stored in the journal but ignored when placing orders.
+- **Shared live-price resolver:** `_resolve_order_type(direction, instrument, symbol, entry_price)` in `webhook.py` is the single source of market/limit/stop logic. Both channels delegate to it, preventing drift between channel-specific implementations.
+- **XAUUSD BIG LOTS ignores signal's explicit order type:** The signal may say "Buy limit" but the bot resolves the actual MT5 order type from live price vs entry price — identical to Vip Thrilokh. The rationale: the signal's stated type can be stale by the time the bot sees it; live-price comparison is always accurate.
+- **Split range entries:** With `SPLIT_RANGE_ENTRIES=true`, a range signal like `SELL 4583/4590` places two orders — one at each price — paired with TP1 and TP2 respectively. Entry prices are ordered so the price closest to filling first gets TP1.
+- **LLM fallback is cache-backed:** `llm_classify.py` normalizes message text (strip emojis, numbers → `#`) to a stable cache key before checking the API. Repeated variants of the same phrase are free after the first call. Cache lives at `cache/classify_cache.json`.
 
 ---
 
@@ -349,12 +375,16 @@ Example — SELL signal XAUUSD entry $2000, tolerance $0.50:
 LIMIT = "enter at a better price than now" (pending below market for BUY, above market for SELL)
 STOP  = "enter when price confirms the move by reaching my level"
 
-### XAUUSD VIP BIG LOTS (explicit — from signal text)
+### XAUUSD VIP BIG LOTS (dynamic — same live-price logic as Vip Thrilokh)
 
-- Order type stated directly: "Buy limit", "Sell limit", or market implied
-- Entry range (e.g. 4664/4656): use closer price to market for quicker fill
-  - BUY limit  → higher of the two (4664)
-  - SELL limit → lower  of the two (4656)
+The explicit order type in the signal text ("Buy limit", "Sell limit", `from`) is **parsed but ignored** for order placement. The actual order type is resolved by comparing the live price to each entry price using `_resolve_order_type` — the same shared helper Vip Thrilokh uses.
+
+With `SPLIT_RANGE_ENTRIES=true` (default) and a range entry (e.g. `4583/4590`):
+- **BUY range** → entry prices `[lo, hi]` — `lo` fills first as price drops; `lo` → TP1, `hi` → TP2
+- **SELL range** → entry prices `[hi, lo]` — `hi` fills first as price rises; `hi` → TP1, `lo` → TP2
+- Each entry price independently resolves to market / limit / stop based on live price
+
+With `SPLIT_RANGE_ENTRIES=false`, only a single entry price is used (closer price to market), and one order per TP level is placed at that price.
 
 ### Auto-cancel triggers (both channels)
 
@@ -365,8 +395,10 @@ Pending limit/stop orders are cancelled automatically when any of these update t
 
 ### Take Profit
 
-- TP1 only for Phase 2
-- TP2 / TP3 splitting deferred to Phase 2.1
+- TP1 + TP2 are always placed when available in the signal (one order per TP level)
+- TP3 is placed when `USE_TP3=true` in .env (default false)
+- Each TP order is sized at `LOT_SIZE` (0.01 lot by default)
+- If the signal has fewer TPs than the active limit, only available TPs are used
 
 ### Position closing
 
@@ -380,7 +412,7 @@ Pending limit/stop orders are cancelled automatically when any of these update t
 - Web UI or dashboard
 - Multi-account Telegram support
 - Risk management / position sizing
-- Multiple TP splitting and partial closes (Phase 2.1)
+- Auto partial-close on "close partials" channel message (Phase 2.1 remainder)
 
 ---
 
@@ -452,12 +484,55 @@ Linking strategy:
 
 ---
 
+## Running the Bot
+
+```powershell
+# Start (single instance, hidden window, restart loop active)
+Start-Process -FilePath "C:\Users\avaid\AppData\Local\Programs\Python\Python311\python.exe" `
+  -ArgumentList "c:\Users\avaid\Downloads\Telegram_Trader-master\main.py" `
+  -WorkingDirectory "c:\Users\avaid\Downloads\Telegram_Trader-master" `
+  -WindowStyle Hidden
+
+# Check it's running (should show exactly one python process)
+Get-Process | Where-Object { $_.Name -match "python|py" } | Format-Table Id, Name, StartTime -AutoSize
+
+# Tail the log
+Get-Content "c:\Users\avaid\Downloads\Telegram_Trader-master\trader.log" -Tail 20 -Wait
+
+# Kill the bot
+Stop-Process -Id (Get-Content "c:\Users\avaid\Downloads\Telegram_Trader-master\bot.pid") -Force
+Remove-Item "c:\Users\avaid\Downloads\Telegram_Trader-master\bot.pid"
+```
+
+---
+
 ## Open Questions
 
-- [ ] TradingView webhook URL format — confirm when Phase 2 begins
 - [ ] More channels to be added later — onboard using the same channel onboarding process defined above
 
 ## TODO (deferred)
 
-- [ ] Add Claude API (claude-haiku) fallback parser once Anthropic API key is available
+- [ ] Auto partial-close when channel sends "close partials" (Phase 2.1 remainder)
 - [ ] Online journal hosting (Google Sheets) — after Phase 1 logic is working
+- [ ] Vip Thrilokh: occasional signals still arrive in old pipe-delimited format (e.g. `eurusd @1.17052 | Sl@ 1.17161 | Tp @1.16510`) — currently classified as noise. Add fallback regex if this recurs.
+
+### Multi-account routing + risk management (planned)
+
+Route signals to 6 MT5 accounts based on asset class:
+- Acc1 & Acc4 → XAUUSD (commodity)
+- Acc2 & Acc5 → Forex pairs
+- Acc3 & Acc6 → NQ / indices
+
+Each account gets its own credentials (`MT5_1_LOGIN` etc.), `daily_loss_limit`, and runtime state in `journal/account_state.json`.
+
+**Lot sizing:** Dynamic at order time — `lot = risk_amount / (sl_distance / tick_size × tick_value)` using live MT5 `symbol_info()`. No hardcoded table.
+
+**Circuit breaker:** After 3 consecutive SLs on an account, mark it `halted=true` and skip all further orders for that account until daily reset. Reset state (consecutive_sl, daily_loss, halted) when the calendar date changes.
+
+**Key implementation notes:**
+- MT5 Python library is single-connection-at-a-time → connect → operate → `mt5.shutdown()` → connect next account (sequential, no extra threads)
+- `_open` dict shape changes from `signal_id → [tickets]` to `signal_id → {acc_name: [tickets]}`
+- `_connect(account)` parameterised; account config list defined at top of `webhook.py`
+- Routing: `asset_class` in `account["instruments"]` and `not account["halted"]`
+- SL hit detection: check `position.profit < 0` on close; TP hit resets consecutive count to 0
+- Open questions before implementing: MT5 terminal paths for all 6 accounts; per-trade risk (fixed $ or % equity); daily reset time (UTC midnight vs market open)

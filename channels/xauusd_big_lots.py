@@ -19,6 +19,8 @@ _TP_HIT_RE  = re.compile(r"TP\d+\s+HIT",       re.I)
 _BE_HIT_RE  = re.compile(r"^be\s+hit$",         re.I)
 _MISSED_RE  = re.compile(r"missed|^delete$",     re.I)
 
+_CLOSE_RE = re.compile(r"\bclose\s+(?:now|at\b)", re.I)
+
 _NOISE_RE = re.compile(
     r"^react\b"
     r"|^i'?m\s+in$"
@@ -49,7 +51,12 @@ def classify(msg) -> str:
         return "trade_update"
     if _BE_HIT_RE.match(text) or _MISSED_RE.search(text):
         return "trade_update"
+    if _CLOSE_RE.search(text):
+        return "trade_update"
     if msg.reply_to_msg_id:
+        return "trade_update"
+    import llm_classify
+    if llm_classify.get_update_type(text, CHANNEL_NAME) != "noise":
         return "trade_update"
     return "noise"
 
@@ -128,8 +135,12 @@ def parse_update(msg, signal_id: str | None) -> dict | None:
         update_type = "sl_hit"
     elif _MISSED_RE.search(text):
         update_type = "cancelled"
+    elif _CLOSE_RE.search(text):
+        update_type = "full_close"
     else:
-        update_type = "commentary"
+        import llm_classify
+        llm_result = llm_classify.get_update_type(text, CHANNEL_NAME)
+        update_type = llm_result if llm_result not in ("noise", "commentary") else "commentary"
 
     return {
         "signal_id":                signal_id,
