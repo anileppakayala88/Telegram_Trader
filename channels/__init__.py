@@ -1,4 +1,4 @@
-from channels import vip_thrilokh, xauusd_big_lots
+from channels import vip_thrilokh, xauusd_big_lots, kathy_zip_forex
 
 # Maps Telegram channel ID → parser module
 # Each parser module must implement:
@@ -6,8 +6,9 @@ from channels import vip_thrilokh, xauusd_big_lots
 #   CHANNEL_ID: int
 #   classify(msg) -> "new_signal" | "trade_update" | "noise"
 #   parse_signal(msg) -> dict | None
-#   parse_update(msg, signal_id) -> dict | None
+#   parse_update(msg, signal_id) -> dict | None  (may return list[dict] for multi-close channels)
 CHANNEL_PARSERS = {
     2133117224: vip_thrilokh,
     1481325093: xauusd_big_lots,
+    2249628758: kathy_zip_forex,
 }

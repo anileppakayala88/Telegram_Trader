@@ -10,6 +10,7 @@ CHANNEL_NAMES = {
     2133117224: "vip_thrilokh",
     1481325093: "xauusd_big_lots",
     2540865305: "test_tv_3min",
+    2249628758: "kathy_zip_forex",
 }
 
 
@@ -20,6 +21,8 @@ class JournalManager:
         self._msg_to_signal: dict[int, dict[int, str]] = {}
         # {channel_id: signal_id} — fallback when update has no reply_to
         self._last_signal: dict[int, str] = {}
+        # {(channel_id, instrument): signal_id} — for channels with no reply threading
+        self._instrument_to_signal: dict[tuple, str] = {}
 
     def _path(self, channel_id: int) -> Path:
         name = CHANNEL_NAMES.get(channel_id, str(channel_id))
@@ -29,9 +32,14 @@ class JournalManager:
         with open(self._path(channel_id), "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def track_signal(self, channel_id: int, telegram_msg_id: int, signal_id: str):
+    def track_signal(self, channel_id: int, telegram_msg_id: int, signal_id: str, instrument: str | None = None):
         self._msg_to_signal.setdefault(channel_id, {})[telegram_msg_id] = signal_id
         self._last_signal[channel_id] = signal_id
+        if instrument:
+            self._instrument_to_signal[(channel_id, instrument.upper())] = signal_id
+
+    def resolve_by_instrument(self, channel_id: int, instrument: str) -> str | None:
+        return self._instrument_to_signal.get((channel_id, instrument.upper()))
 
     def resolve_signal_id(self, channel_id: int, reply_to_msg_id: int | None) -> str | None:
         if reply_to_msg_id:
@@ -54,12 +62,15 @@ class JournalManager:
                     try:
                         entry = json.loads(line)
                         if entry.get("message_type") == "new_signal":
-                            tid = entry.get("telegram_msg_id")
-                            sid = entry.get("signal_id")
+                            tid        = entry.get("telegram_msg_id")
+                            sid        = entry.get("signal_id")
+                            instrument = entry.get("instrument")
                             if tid and sid:
                                 self._msg_to_signal[channel_id][tid] = sid
                                 self._last_signal[channel_id] = sid
                                 count += 1
+                            if instrument and sid:
+                                self._instrument_to_signal[(channel_id, instrument.upper())] = sid
                     except json.JSONDecodeError:
                         continue
             log.info(f"Loaded {count} signals from {name}.jsonl")

@@ -54,7 +54,7 @@ def register_handlers(client, journal):
                     return
 
                 journal.write(channel_id, entry)
-                journal.track_signal(channel_id, msg.id, entry["signal_id"])
+                journal.track_signal(channel_id, msg.id, entry["signal_id"], entry.get("instrument"))
                 log.info(
                     f"[{parser.CHANNEL_NAME}] SIGNAL {entry['instrument']} "
                     f"{entry['direction']} @ {entry['entry']} "
@@ -67,19 +67,27 @@ def register_handlers(client, journal):
 
             elif msg_type == "trade_update":
                 signal_id = journal.resolve_signal_id(channel_id, msg.reply_to_msg_id)
-                entry = parser.parse_update(msg, signal_id)
-                if not entry:
+                result    = parser.parse_update(msg, signal_id)
+                if not result:
                     return
-                journal.write(channel_id, entry)
-                log.info(
-                    f"[{parser.CHANNEL_NAME}] UPDATE {entry['update_type']} "
-                    f"→ signal_id={signal_id or 'unlinked'}"
-                )
-                if entry["update_type"] in ("full_close", "sl_hit", "cancelled") and signal_id:
-                    asyncio.create_task(webhook.handle_close(signal_id))
-                elif entry["update_type"] == "tp_hit" and signal_id:
-                    # Move remaining positions to breakeven (or close all if MOVE_SL_TO_BE_ON_TP1=false)
-                    asyncio.create_task(webhook.handle_tp_hit(signal_id))
+                # Parsers may return a single dict or a list (e.g. Kathy ZIP multi-close)
+                entries = result if isinstance(result, list) else [result]
+                for entry in entries:
+                    # Channels without reply threading (e.g. Kathy ZIP) leave signal_id=None
+                    # and set instrument — resolve here by instrument lookup
+                    if entry.get("signal_id") is None and entry.get("instrument"):
+                        entry["signal_id"] = journal.resolve_by_instrument(channel_id, entry["instrument"])
+                    sid = entry.get("signal_id")
+                    journal.write(channel_id, entry)
+                    log.info(
+                        f"[{parser.CHANNEL_NAME}] UPDATE {entry['update_type']} "
+                        f"→ signal_id={sid or 'unlinked'}"
+                    )
+                    if entry["update_type"] in ("full_close", "sl_hit", "cancelled") and sid:
+                        asyncio.create_task(webhook.handle_close(sid))
+                    elif entry["update_type"] == "tp_hit" and sid:
+                        # Move remaining positions to breakeven (or close all if MOVE_SL_TO_BE_ON_TP1=false)
+                        asyncio.create_task(webhook.handle_tp_hit(sid))
 
         except Exception:
             log.exception(f"[{parser.CHANNEL_NAME}] Error processing msg_id={msg.id}")
