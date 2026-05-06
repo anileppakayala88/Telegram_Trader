@@ -71,6 +71,17 @@ _SIGNAL_RE = re.compile(
 # Finds every TP line in the full message text (used after _SIGNAL_RE matches)
 _TP_RE = re.compile(r"^[ \t]*tp\d*[. \t]+@?[ \t]*([\d.]+)", re.IGNORECASE | re.MULTILINE)
 
+# Pipe-delimited single-line format: "eurusd @1.17052 | Sl@ 1.17161 | Tp @1.16510"
+_PIPE_SIGNAL_RE = re.compile(
+    r"^\W*(?:(buy|sell)[ \t]+)?(\w+)[ \t]*@[ \t]*([\d.]+)"
+    r"[ \t]*\|[ \t]*sl@?[ \t]*([\d.]+)"
+    r"[ \t]*\|[ \t]*tp\d*[ \t]*@?[ \t]*([\d.]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Finds every TP segment in a pipe-delimited signal line
+_PIPE_TP_RE = re.compile(r"\|[ \t]*tp\d*[ \t]*@?[ \t]*([\d.]+)", re.IGNORECASE)
+
 # Ordered by severity — first match wins
 _UPDATE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\ball\s+tp\s+hit|all\s+tp\s+hitted",   re.I),       "full_close"),
@@ -116,7 +127,7 @@ def classify(msg) -> str:
         return "noise"
     if msg.reply_to_msg_id:
         return "trade_update"
-    if _SIGNAL_RE.search(text):
+    if _SIGNAL_RE.search(text) or _PIPE_SIGNAL_RE.search(text):
         return "new_signal"
     for pat, _ in _UPDATE_PATTERNS:
         if pat.search(text):
@@ -132,16 +143,27 @@ def parse_signal(msg) -> dict | None:
     has_image = msg.media is not None
 
     m = _SIGNAL_RE.search(text)
-    if not m:
-        return None
+    if m:
+        dir_before, instrument_raw, dir_after, entry_raw, sl_raw, _ = m.groups()
+        instrument    = _normalise(instrument_raw)
+        entry         = float(entry_raw)
+        sl            = float(sl_raw)
+        direction_raw = dir_before or dir_after
+        direction     = direction_raw.upper() if direction_raw else ("SELL" if sl > entry else "BUY")
+        tps           = [float(x) for x in _TP_RE.findall(text)]
+    else:
+        m = _PIPE_SIGNAL_RE.search(text)
+        if not m:
+            return None
+        dir_prefix, instrument_raw, entry_raw, sl_raw, _ = m.groups()
+        instrument = _normalise(instrument_raw)
+        entry      = float(entry_raw)
+        sl         = float(sl_raw)
+        direction  = dir_prefix.upper() if dir_prefix else ("SELL" if sl > entry else "BUY")
+        line_end   = text.find('\n', m.start())
+        line       = text[m.start():] if line_end == -1 else text[m.start():line_end]
+        tps        = [float(x) for x in _PIPE_TP_RE.findall(line)]
 
-    dir_before, instrument_raw, dir_after, entry_raw, sl_raw, _ = m.groups()
-    instrument    = _normalise(instrument_raw)
-    entry         = float(entry_raw)
-    sl            = float(sl_raw)
-    direction_raw = dir_before or dir_after
-    direction     = direction_raw.upper() if direction_raw else ("SELL" if sl > entry else "BUY")
-    tps           = [float(x) for x in _TP_RE.findall(text)]
     return {
         "signal_id":           str(uuid.uuid4()),
         "telegram_msg_id":     msg.id,
