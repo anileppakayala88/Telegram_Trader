@@ -1,14 +1,37 @@
 """
-webhook.py — MT5 order execution
+webhook.py — MT5 order execution (multi-account)
 
-Connects to a locally running MetaTrader 5 terminal and places/closes orders
-in response to parsed Telegram signals.
+Routes signals to MT5 accounts by asset class. Each asset class has two
+accounts; both receive the same trade. Orders are placed sequentially —
+connect → trade → shutdown → next account — because the MT5 Python library
+supports one terminal connection at a time.
 
-Set DRY_RUN=true in .env (default) to log orders without executing.
-Set DRY_RUN=false only when ready to trade live.
+Account config lives in the ACCOUNTS list below. Credentials are loaded from
+.env (dummy defaults are in place until real creds are provided). Circuit-
+breaker state is persisted to journal/account_state.json.
 
-Required .env vars: MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, DRY_RUN
-MT5 terminal must be installed and running on this machine (Windows only).
+Required .env vars per account group (see ACCOUNTS):
+    MT5_COMMODITY_1_LOGIN / _PASSWORD / _SERVER
+    MT5_COMMODITY_2_LOGIN / _PASSWORD / _SERVER
+    MT5_FOREX_1_LOGIN     / _PASSWORD / _SERVER
+    MT5_FOREX_2_LOGIN     / _PASSWORD / _SERVER
+    MT5_INDEX_1_LOGIN     / _PASSWORD / _SERVER
+    MT5_INDEX_2_LOGIN     / _PASSWORD / _SERVER
+
+Risk per account group (shared between the two accounts in each group):
+    MT5_COMMODITY_RISK_PCT=1.0   (% of equity; ignored when RISK_USD is set)
+    MT5_COMMODITY_RISK_USD=      (fixed $ per trade; overrides RISK_PCT if set)
+    MT5_FOREX_RISK_PCT=1.0
+    MT5_FOREX_RISK_USD=
+    MT5_INDEX_RISK_PCT=1.0
+    MT5_INDEX_RISK_USD=
+
+Other flags:
+    DRY_RUN=true
+    USE_TP3=false
+    SPLIT_RANGE_ENTRIES=true
+    MOVE_SL_TO_BE_ON_TP1=true
+    CIRCUIT_BREAKER_SL_LIMIT=3
 """
 
 import asyncio
@@ -16,6 +39,7 @@ import json
 import logging
 import os
 import time
+from datetime import date
 from pathlib import Path
 
 import MetaTrader5 as mt5
@@ -25,11 +49,9 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-# ── User-configurable ──────────────────────────────────────────────────────────
-# Pips from signal price that still qualifies as a market order, per instrument.
-# Tighter for stable forex; wider for volatile crypto/indices.
+# ── Market / tolerance config (unchanged from single-account version) ──────────
+
 ENTRY_TOLERANCE_PIPS: dict[str, float] = {
-    # Forex majors / minors — 3 pips
     "EURUSD": 3, "GBPUSD": 3, "AUDUSD": 3, "NZDUSD": 3,
     "USDCAD": 3, "USDCHF": 3, "USDJPY": 3,
     "EURGBP": 3, "EURJPY": 3, "EURCAD": 3, "EURCHF": 3,
@@ -37,58 +59,31 @@ ENTRY_TOLERANCE_PIPS: dict[str, float] = {
     "GBPCAD": 3, "GBPCHF": 3, "GBPNZD": 3, "AUDJPY": 3,
     "AUDNZD": 3, "AUDCAD": 3, "AUDCHF": 3, "NZDJPY": 3,
     "CADJPY": 3, "CADCHF": 3, "CHFJPY": 3,
-    # Commodities — wider due to spread + volatility
     "XAUUSD": 5, "XAGUSD": 5,
-    # Indices
     "NAS100": 10, "US30": 10, "SPX500": 5,
-    # Crypto — very wide; 30-pt swings are noise
     "BTCUSD": 50, "ETHUSD": 20,
 }
-_DEFAULT_TOLERANCE_PIPS = 3     # fallback for any symbol not listed above
+_DEFAULT_TOLERANCE_PIPS = 3
 
-PIP_SIZE: dict[str, float] = {  # price value of 1 pip per instrument
-    # Majors
+PIP_SIZE: dict[str, float] = {
     "EURUSD": 0.0001, "USDJPY": 0.01,   "GBPUSD": 0.0001,
     "USDCHF": 0.0001, "AUDUSD": 0.0001, "USDCAD": 0.0001, "NZDUSD": 0.0001,
-    # Minors / crosses — JPY pairs are 0.01, everything else 0.0001
     "EURGBP": 0.0001, "EURJPY": 0.01,   "EURCAD": 0.0001,
     "EURCHF": 0.0001, "EURAUD": 0.0001, "EURNZD": 0.0001,
     "GBPJPY": 0.01,   "GBPAUD": 0.0001, "GBPCAD": 0.0001,
     "GBPCHF": 0.0001, "GBPNZD": 0.0001,
     "AUDJPY": 0.01,   "AUDNZD": 0.0001, "AUDCAD": 0.0001, "AUDCHF": 0.0001,
     "NZDJPY": 0.01,   "CADJPY": 0.01,   "CADCHF": 0.0001, "CHFJPY": 0.01,
-    # Commodities / crypto / indices
     "XAUUSD": 0.10,   "XAGUSD": 0.01,
     "BTCUSD": 10.0,   "ETHUSD": 1.0,
     "NAS100": 1.0,    "US30":   1.0,    "SPX500": 0.25,
 }
 
-LOT_SIZE = 0.01                 # lot size per TP order — each TP level gets its own order at this size
-
-# TP order configuration
-# TP1 and TP2 are always placed when available in the signal.
-# Set USE_TP3=true in .env to also place a third order targeting TP3.
-# If the signal has fewer TPs than the active limit, only available TPs are used.
-USE_TP3 = os.getenv("USE_TP3", "false").lower() == "true"
-_MAX_TP_ORDERS = 3 if USE_TP3 else 2
-
-# Place one order per range price (one at each price in the entry range).
-# Each order is paired with a TP level: first range price → TP1, second → TP2.
-# Only applies to XAUUSD VIP BIG LOTS limit orders with a range (e.g. 4583/4590).
-# Set SPLIT_RANGE_ENTRIES=false to use the old behaviour (single entry, one order per TP).
-SPLIT_RANGE_ENTRIES = os.getenv("SPLIT_RANGE_ENTRIES", "true").lower() == "true"
-
-# After TP1 is hit, move the SL of remaining open positions to their fill price (breakeven).
-# Set MOVE_SL_TO_BE_ON_TP1=false to close all remaining positions on tp_hit instead.
-MOVE_SL_TO_BE_ON_TP1 = os.getenv("MOVE_SL_TO_BE_ON_TP1", "true").lower() == "true"
-
 # Broker-specific symbol names — Exness appends 'm' to all symbols
 SYMBOL_MAP: dict[str, str] = {
-    # Majors
     "EURUSD": "EURUSDm", "USDJPY": "USDJPYm", "GBPUSD": "GBPUSDm",
     "USDCHF": "USDCHFm", "AUDUSD": "AUDUSDm", "USDCAD": "USDCADm",
     "NZDUSD": "NZDUSDm",
-    # Minors / crosses
     "EURGBP": "EURGBPm", "EURJPY": "EURJPYm", "EURCAD": "EURCADm",
     "EURCHF": "EURCHFm", "EURAUD": "EURAUDm", "EURNZD": "EURNZDm",
     "GBPJPY": "GBPJPYm", "GBPAUD": "GBPAUDm", "GBPCAD": "GBPCADm",
@@ -96,94 +91,233 @@ SYMBOL_MAP: dict[str, str] = {
     "AUDJPY": "AUDJPYm", "AUDNZD": "AUDNZDm", "AUDCAD": "AUDCADm",
     "AUDCHF": "AUDCHFm", "NZDJPY": "NZDJPYm", "CADJPY": "CADJPYm",
     "CADCHF": "CADCHFm", "CHFJPY": "CHFJPYm",
-    # Commodities / crypto / indices
     "XAUUSD": "XAUUSDm", "XAGUSD": "XAGUSDm",
     "BTCUSD": "BTCUSDm", "ETHUSD": "ETHUSDm",
     "NAS100": "NAS100m", "US30":   "US30m",   "SPX500": "SPX500m",
 }
+
+# ── Feature flags ──────────────────────────────────────────────────────────────
+
+USE_TP3              = os.getenv("USE_TP3",              "false").lower() == "true"
+_MAX_TP_ORDERS       = 3 if USE_TP3 else 2
+SPLIT_RANGE_ENTRIES  = os.getenv("SPLIT_RANGE_ENTRIES",  "true").lower()  == "true"
+MOVE_SL_TO_BE_ON_TP1 = os.getenv("MOVE_SL_TO_BE_ON_TP1","true").lower()  == "true"
+
+# Number of consecutive SL hits on one account before it is halted for the day.
+# Change CIRCUIT_BREAKER_SL_LIMIT in .env to adjust without touching code.
+CIRCUIT_BREAKER_SL_LIMIT = int(os.getenv("CIRCUIT_BREAKER_SL_LIMIT", "3"))
+
+# ── Account configuration ──────────────────────────────────────────────────────
+# To add an account: copy an entry, change name/login/password/server/asset_classes.
+# To disable an account without removing it: set its login to 0 — place_order
+# will skip it (no valid MT5 account number).
+#
+# risk_pct  : risk per trade as % of current equity
+# risk_usd  : fixed risk per trade in account currency (overrides risk_pct when set)
+#
+# The runtime state fields (halted / consecutive_sl / last_reset_date) are
+# initialised here and then overwritten by _load_account_state() on startup.
+
+def _opt_float(val: str | None) -> float | None:
+    try:
+        return float(val) if val else None
+    except ValueError:
+        return None
+
+
+ACCOUNTS: list[dict] = [
+    # ── Commodity (XAUUSD, XAGUSD) ────────────────────────────────────────────
+    {
+        "name":           "commodity_1",
+        "login":          int(os.getenv("MT5_COMMODITY_1_LOGIN",    "10000001")),
+        "password":       os.getenv("MT5_COMMODITY_1_PASSWORD",     "dummy"),
+        "server":         os.getenv("MT5_COMMODITY_1_SERVER",       "Exness-MT5Trial"),
+        "asset_classes":  ["commodity"],
+        "risk_pct":       float(os.getenv("MT5_COMMODITY_RISK_PCT", "1.0")),
+        "risk_usd":       _opt_float(os.getenv("MT5_COMMODITY_RISK_USD")),
+        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
+    },
+    {
+        "name":           "commodity_2",
+        "login":          int(os.getenv("MT5_COMMODITY_2_LOGIN",    "10000002")),
+        "password":       os.getenv("MT5_COMMODITY_2_PASSWORD",     "dummy"),
+        "server":         os.getenv("MT5_COMMODITY_2_SERVER",       "Exness-MT5Trial"),
+        "asset_classes":  ["commodity"],
+        "risk_pct":       float(os.getenv("MT5_COMMODITY_RISK_PCT", "1.0")),
+        "risk_usd":       _opt_float(os.getenv("MT5_COMMODITY_RISK_USD")),
+        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
+    },
+    # ── Forex ─────────────────────────────────────────────────────────────────
+    {
+        "name":           "forex_1",
+        "login":          int(os.getenv("MT5_FOREX_1_LOGIN",        "10000003")),
+        "password":       os.getenv("MT5_FOREX_1_PASSWORD",         "dummy"),
+        "server":         os.getenv("MT5_FOREX_1_SERVER",           "Exness-MT5Trial"),
+        "asset_classes":  ["forex"],
+        "risk_pct":       float(os.getenv("MT5_FOREX_RISK_PCT",     "1.0")),
+        "risk_usd":       _opt_float(os.getenv("MT5_FOREX_RISK_USD")),
+        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
+    },
+    {
+        "name":           "forex_2",
+        "login":          int(os.getenv("MT5_FOREX_2_LOGIN",        "10000004")),
+        "password":       os.getenv("MT5_FOREX_2_PASSWORD",         "dummy"),
+        "server":         os.getenv("MT5_FOREX_2_SERVER",           "Exness-MT5Trial"),
+        "asset_classes":  ["forex"],
+        "risk_pct":       float(os.getenv("MT5_FOREX_RISK_PCT",     "1.0")),
+        "risk_usd":       _opt_float(os.getenv("MT5_FOREX_RISK_USD")),
+        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
+    },
+    # ── Index (NAS100, US30, SPX500) ──────────────────────────────────────────
+    {
+        "name":           "index_1",
+        "login":          int(os.getenv("MT5_INDEX_1_LOGIN",        "10000005")),
+        "password":       os.getenv("MT5_INDEX_1_PASSWORD",         "dummy"),
+        "server":         os.getenv("MT5_INDEX_1_SERVER",           "Exness-MT5Trial"),
+        "asset_classes":  ["index"],
+        "risk_pct":       float(os.getenv("MT5_INDEX_RISK_PCT",     "1.0")),
+        "risk_usd":       _opt_float(os.getenv("MT5_INDEX_RISK_USD")),
+        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
+    },
+    {
+        "name":           "index_2",
+        "login":          int(os.getenv("MT5_INDEX_2_LOGIN",        "10000006")),
+        "password":       os.getenv("MT5_INDEX_2_PASSWORD",         "dummy"),
+        "server":         os.getenv("MT5_INDEX_2_SERVER",           "Exness-MT5Trial"),
+        "asset_classes":  ["index"],
+        "risk_pct":       float(os.getenv("MT5_INDEX_RISK_PCT",     "1.0")),
+        "risk_usd":       _opt_float(os.getenv("MT5_INDEX_RISK_USD")),
+        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
+    },
+    # ── Crypto (BTCUSD, ETHUSD) — add accounts here when ready ───────────────
+    # {
+    #     "name":          "crypto_1",
+    #     "login":         int(os.getenv("MT5_CRYPTO_1_LOGIN",    "10000007")),
+    #     "password":      os.getenv("MT5_CRYPTO_1_PASSWORD",     "dummy"),
+    #     "server":        os.getenv("MT5_CRYPTO_1_SERVER",       "Exness-MT5Trial"),
+    #     "asset_classes": ["crypto"],
+    #     "risk_pct":      float(os.getenv("MT5_CRYPTO_RISK_PCT", "1.0")),
+    #     "risk_usd":      _opt_float(os.getenv("MT5_CRYPTO_RISK_USD")),
+    #     "halted": False, "consecutive_sl": 0, "last_reset_date": None,
+    # },
+]
+
+
+def _account_by_name(name: str) -> dict | None:
+    return next((a for a in ACCOUNTS if a["name"] == name), None)
+
 # ──────────────────────────────────────────────────────────────────────────────
 
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-_POSITIONS_FILE = Path("journal/positions.json")
+_POSITIONS_FILE     = Path("journal/positions.json")
+_ACCOUNT_STATE_FILE = Path("journal/account_state.json")
 
-# In-memory map: signal_id → list of MT5 ticket numbers (one per TP order).
-# Multiple tickets per signal because each TP level is a separate order.
-# MT5 uses the same ticket number whether an order is pending or filled.
-_open: dict[str, list[int]] = {}
+# In-memory map: signal_id → {account_name: [ticket, ...]}
+# Each account that received the signal has its own ticket list.
+_open: dict[str, dict[str, list[int]]] = {}
 
 
 # ── MT5 connection ─────────────────────────────────────────────────────────────
 
-_MT5_RETRIES    = 3   # attempts before giving up on a single order action
-_MT5_RETRY_WAIT = 5   # seconds between retries
+_MT5_RETRIES    = 3
+_MT5_RETRY_WAIT = 5
 
-def _connect() -> bool:
-    """Connect to the running MT5 terminal with up to _MT5_RETRIES attempts.
-    Retries handle the case where MT5 is mid-restart when a signal arrives."""
-    login    = os.getenv("MT5_LOGIN")
-    password = os.getenv("MT5_PASSWORD")
-    server   = os.getenv("MT5_SERVER")
 
-    kwargs: dict = {}
-    if login and password and server:
-        kwargs = {"login": int(login), "password": password, "server": server}
-
+def _connect(account: dict) -> bool:
+    """Initialise MT5 for a specific account. Always call mt5.shutdown() after."""
     for attempt in range(1, _MT5_RETRIES + 1):
-        if mt5.initialize(**kwargs):
+        if mt5.initialize(
+            login=account["login"],
+            password=account["password"],
+            server=account["server"],
+        ):
             return True
         err = mt5.last_error()
         if attempt < _MT5_RETRIES:
-            log.warning(f"MT5 initialize failed (attempt {attempt}/{_MT5_RETRIES}): {err} — retrying in {_MT5_RETRY_WAIT}s")
+            log.warning(
+                f"MT5 initialize [{account['name']}] attempt {attempt}/{_MT5_RETRIES} failed: {err}"
+                f" — retrying in {_MT5_RETRY_WAIT}s"
+            )
             time.sleep(_MT5_RETRY_WAIT)
         else:
-            log.error(f"MT5 initialize failed after {_MT5_RETRIES} attempts: {err}")
+            log.error(f"MT5 initialize [{account['name']}] failed after {_MT5_RETRIES} attempts: {err}")
     return False
+
+
+# ── Circuit breaker ────────────────────────────────────────────────────────────
+
+def _daily_reset_if_needed(account: dict) -> None:
+    """Reset consecutive SL counter and halted flag at the start of each calendar day."""
+    today = str(date.today())
+    if account.get("last_reset_date") != today:
+        account["consecutive_sl"]  = 0
+        account["halted"]          = False
+        account["last_reset_date"] = today
+        _save_account_state()
 
 
 # ── Persistence ────────────────────────────────────────────────────────────────
 
 def load_state() -> None:
-    """Load persisted ticket map from disk and reconcile against live MT5 state.
-    Migrates old single-ticket format (signal_id → int) to list format automatically.
-    Prunes tickets that no longer exist in MT5 (closed while bot was down)."""
+    """Load position map and account circuit-breaker state from disk on startup."""
     global _open
+    _load_account_state()
+
     if not _POSITIONS_FILE.exists():
         return
 
     with open(_POSITIONS_FILE, encoding="utf-8") as f:
         raw = json.load(f)
 
-    # Migrate: old format stored a single int; new format stores a list
     _open = {}
-    for k, v in raw.items():
-        if isinstance(v, list):
-            _open[k] = [int(t) for t in v]
+    migrated = 0
+    for signal_id, val in raw.items():
+        if isinstance(val, dict):
+            _open[signal_id] = {k: [int(t) for t in v] for k, v in val.items()}
         else:
-            _open[k] = [int(v)]
+            # Old single-account format: list or int — wrap under "legacy" key
+            tickets = [int(t) for t in val] if isinstance(val, list) else [int(val)]
+            _open[signal_id] = {"legacy": tickets}
+            migrated += 1
 
-    log.info(f"Loaded {len(_open)} tracked signals ({sum(len(t) for t in _open.values())} tickets) from disk")
+    if migrated:
+        log.warning(
+            f"Migrated {migrated} signal(s) from old single-account positions format "
+            f"— legacy tickets will not reconcile against named accounts"
+        )
+
+    total_tickets = sum(len(t) for acc in _open.values() for t in acc.values())
+    log.info(f"Loaded {len(_open)} tracked signals ({total_tickets} tickets) from disk")
 
     if not _open or DRY_RUN:
         return
 
-    if not _connect():
-        log.warning("MT5 unavailable at startup — skipping position reconciliation; stale tickets may exist")
-        return
-
+    # Reconcile: prune tickets that no longer exist in MT5 (closed while bot was down)
     stale_signals = []
-    for signal_id, tickets in _open.items():
-        remaining = []
-        for ticket in tickets:
-            live    = mt5.positions_get(ticket=ticket)
-            pending = mt5.orders_get(ticket=ticket)
-            if live or pending:
-                remaining.append(ticket)
-            else:
-                log.warning(f"Startup reconcile: ticket {ticket} not found in MT5 — removing (signal_id={signal_id})")
-        if remaining:
-            _open[signal_id] = remaining
-        else:
+    for signal_id, acc_tickets in _open.items():
+        for acc_name, tickets in list(acc_tickets.items()):
+            if acc_name == "legacy":
+                continue
+            account = _account_by_name(acc_name)
+            if not account:
+                continue
+            if not _connect(account):
+                mt5.shutdown()
+                continue
+            remaining = []
+            for ticket in tickets:
+                if mt5.positions_get(ticket=ticket) or mt5.orders_get(ticket=ticket):
+                    remaining.append(ticket)
+                else:
+                    log.warning(
+                        f"Startup reconcile [{acc_name}]: ticket {ticket} not in MT5"
+                        f" — removing (signal_id={signal_id})"
+                    )
+            acc_tickets[acc_name] = remaining
+            mt5.shutdown()
+
+        if all(len(t) == 0 for t in acc_tickets.values()):
             stale_signals.append(signal_id)
 
     for sid in stale_signals:
@@ -191,7 +325,10 @@ def load_state() -> None:
 
     if stale_signals:
         _save()
-        log.info(f"Reconciliation removed {len(stale_signals)} fully closed signal(s); {len(_open)} active remain")
+        log.info(
+            f"Reconciliation removed {len(stale_signals)} fully closed signal(s);"
+            f" {len(_open)} active remain"
+        )
 
 
 def _save() -> None:
@@ -199,16 +336,68 @@ def _save() -> None:
         json.dump(_open, f, indent=2)
 
 
+def _load_account_state() -> None:
+    if not _ACCOUNT_STATE_FILE.exists():
+        return
+    with open(_ACCOUNT_STATE_FILE, encoding="utf-8") as f:
+        saved = json.load(f)
+    for account in ACCOUNTS:
+        s = saved.get(account["name"])
+        if s:
+            account["halted"]          = s.get("halted",           False)
+            account["consecutive_sl"]  = s.get("consecutive_sl",   0)
+            account["last_reset_date"] = s.get("last_reset_date")
+
+
+def _save_account_state() -> None:
+    state = {
+        a["name"]: {
+            "halted":          a["halted"],
+            "consecutive_sl":  a["consecutive_sl"],
+            "last_reset_date": a["last_reset_date"],
+        }
+        for a in ACCOUNTS
+    }
+    with open(_ACCOUNT_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+# ── Dynamic lot sizing ─────────────────────────────────────────────────────────
+
+def _calc_lot(account: dict, symbol: str, instrument: str, entry: float, sl: float) -> float:
+    """Lot size = risk_amount / (sl_ticks × tick_value).
+    Uses risk_usd if set, otherwise risk_pct % of current equity."""
+    sl_dist = abs(entry - sl)
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        raise RuntimeError(f"Cannot get symbol_info for {symbol}")
+
+    if sl_dist == 0:
+        log.warning(f"SL distance is 0 for {instrument} — using minimum lot")
+        return info.volume_min
+
+    if account.get("risk_usd"):
+        risk = float(account["risk_usd"])
+    else:
+        acc_info = mt5.account_info()
+        if acc_info is None:
+            raise RuntimeError(f"Cannot get account_info for {account['name']}")
+        risk = acc_info.equity * account["risk_pct"] / 100
+
+    sl_ticks = sl_dist / info.trade_tick_size
+    lot      = risk / (sl_ticks * info.trade_tick_value)
+
+    step = info.volume_step
+    lot  = round(lot / step) * step
+    lot  = max(info.volume_min, min(lot, info.volume_max))
+    return round(lot, 2)
+
+
 # ── Channel-specific entry logic ───────────────────────────────────────────────
 
 def _resolve_order_type(direction: str, instrument: str, symbol: str, entry_price: float) -> tuple[int, int, float]:
-    """Determine MT5 action, order type, and execution price by comparing the
-    live market price to a signal entry price.
-
-    Returns (action, mt5_order_type, price):
-      - market order if within tolerance  → price is current bid/ask
-      - pending limit/stop otherwise      → price is the signal entry
-    """
+    """Compare live price to signal entry → market, limit, or stop order.
+    Returns (mt5_action, mt5_order_type, execution_price)."""
     tol_pips  = ENTRY_TOLERANCE_PIPS.get(instrument, _DEFAULT_TOLERANCE_PIPS)
     tolerance = tol_pips * PIP_SIZE.get(instrument, 0.0001)
 
@@ -230,7 +419,6 @@ def _resolve_order_type(direction: str, instrument: str, symbol: str, entry_pric
 
 
 def _resolve_thrilokh(signal: dict) -> tuple[int, int, float]:
-    """Decide MT5 order type for Vip Thrilokh signals. Returns (action, mt5_order_type, price)."""
     instrument = signal["instrument"]
     return _resolve_order_type(
         signal["direction"],
@@ -241,16 +429,7 @@ def _resolve_thrilokh(signal: dict) -> tuple[int, int, float]:
 
 
 def _resolve_xauusd(signal: dict) -> list[tuple[int, int, float]]:
-    """Resolve MT5 order types for XAUUSD VIP BIG LOTS signals.
-
-    Uses live price comparison (same logic as Vip Thrilokh) to determine the
-    actual order type for each entry price — ignoring the explicit type in the
-    signal text. Each entry price independently resolves to market, limit, or stop.
-
-    With SPLIT_RANGE_ENTRIES and a range, returns two tuples (one per price):
-      BUY  range → [hi, lo]  — hi fills first as price drops into the range
-      SELL range → [lo, hi]  — lo fills first as price rises into the range
-    """
+    """Resolve one order spec per entry price for XAUUSD BIG LOTS range signals."""
     direction  = signal["direction"]
     instrument = signal["instrument"]
     symbol     = SYMBOL_MAP.get(instrument, instrument)
@@ -275,91 +454,133 @@ async def place_order(signal: dict) -> None:
 
 
 def _place_order_sync(signal: dict) -> None:
-    signal_id  = signal["signal_id"]
-    instrument = signal["instrument"]
-    sl         = signal.get("sl")
-    tps        = signal.get("tp") or []
-    channel_id = signal["source_channel_id"]
-    symbol     = SYMBOL_MAP.get(instrument, instrument)
+    asset_class = signal.get("asset_class", "")
+    signal_id   = signal["signal_id"]
+    instrument  = signal["instrument"]
+    sl          = signal.get("sl")
+    tps         = signal.get("tp") or []
+    channel_id  = signal["source_channel_id"]
+    symbol      = SYMBOL_MAP.get(instrument, instrument)
 
     if not tps or sl is None:
         log.warning(
-            f"place_order skipped — signal must have both SL and at least one TP "
-            f"(sl={sl}, tps={tps}) signal_id={signal_id}"
+            f"place_order skipped — signal must have both SL and at least one TP"
+            f" (sl={sl}, tps={tps}) signal_id={signal_id}"
         )
         return
 
     tp_levels = tps[:_MAX_TP_ORDERS]
 
+    # Accounts that handle this asset class
+    matching = [a for a in ACCOUNTS if asset_class in a["asset_classes"]]
+    if not matching:
+        log.warning(
+            f"No accounts configured for asset_class={asset_class!r} — "
+            f"signal {signal_id} ({instrument}) will not be traded"
+        )
+        return
+
     if DRY_RUN:
-        # No MT5 connection in dry-run — show signal entry prices only (type resolved at live execution)
         if channel_id == 1481325093 and signal.get("entry_range") and SPLIT_RANGE_ENTRIES:
             lo, hi = signal["entry_range"]
             prices = [hi, lo] if signal["direction"] == "BUY" else [lo, hi]
-            # Each entry price paired with its own TP; same zip logic as live path
             dry_pairs = list(zip(prices, tp_levels))
         else:
             dry_pairs = [(signal["entry"], tp) for tp in tp_levels]
-        for i, (price, tp) in enumerate(dry_pairs, 1):
-            log.info(
-                f"[DRY RUN] place_order TP{i}/{len(dry_pairs)} — "
-                f"{signal['direction']} {instrument} @ {price} SL={sl} TP={tp} signal_id={signal_id}"
+        for acc in matching:
+            for i, (price, tp) in enumerate(dry_pairs, 1):
+                log.info(
+                    f"[DRY RUN] [{acc['name']}] TP{i}/{len(dry_pairs)} — "
+                    f"{signal['direction']} {instrument} @ {price} SL={sl} TP={tp}"
+                    f" signal_id={signal_id}"
+                )
+        return
+
+    signal_tickets: dict[str, list[int]] = {}
+
+    for account in matching:
+        _daily_reset_if_needed(account)
+        if account["halted"]:
+            log.warning(
+                f"[{account['name']}] halted (consecutive_sl={account['consecutive_sl']})"
+                f" — skipping signal_id={signal_id}"
             )
-        return
+            continue
 
-    if not _connect():
-        return
+        if not _connect(account):
+            mt5.shutdown()
+            continue
 
-    try:
-        if channel_id == 2133117224:    # Vip Thrilokh — single entry, one order per TP
-            spec   = _resolve_thrilokh(signal)
-            orders_tps = [(spec, tp) for tp in tp_levels]
-        elif channel_id == 1481325093:  # XAUUSD VIP BIG LOTS — live-price resolution per entry
-            specs  = _resolve_xauusd(signal)   # list of (action, mt5_type, price)
-            if len(specs) == 1:
-                # Single entry — replicate for each TP level (same as Thrilokh)
-                orders_tps = [(specs[0], tp) for tp in tp_levels]
-            else:
-                # Split range — each entry price paired with its own TP level
-                orders_tps = list(zip(specs, tp_levels))
-        else:
-            log.warning(f"place_order: no order logic for channel {channel_id}")
-            return
+        try:
+            if channel_id == 2133117224:      # Vip Thrilokh — single entry
+                spec       = _resolve_thrilokh(signal)
+                orders_tps = [(spec, tp) for tp in tp_levels]
+            elif channel_id == 1481325093:    # XAUUSD VIP BIG LOTS — range aware
+                specs = _resolve_xauusd(signal)
+                orders_tps = (
+                    list(zip(specs, tp_levels)) if len(specs) > 1
+                    else [(specs[0], tp) for tp in tp_levels]
+                )
+            else:                             # Kathy ZIP and any future channels
+                spec       = _resolve_thrilokh(signal)
+                orders_tps = [(spec, tp) for tp in tp_levels]
 
-        tickets = []
-        for i, ((action, mt5_type, price), tp) in enumerate(orders_tps, 1):
-            # Market orders use IOC; pending orders use RETURN (partial fill allowed)
-            filling = mt5.ORDER_FILLING_IOC if action == mt5.TRADE_ACTION_DEAL else mt5.ORDER_FILLING_RETURN
-            request: dict = {
-                "action":       action,
-                "symbol":       symbol,
-                "volume":       LOT_SIZE,
-                "type":         mt5_type,
-                "price":        price,
-                "sl":           sl,
-                "tp":           tp,
-                "type_time":    mt5.ORDER_TIME_GTC,
-                "type_filling": filling,
-            }
-            log.info(f"Sending TP{i}/{len(orders_tps)} order: {instrument} {signal['direction']} @ {price} SL={sl} TP={tp}")
-            result = mt5.order_send(request)
+            tickets = []
+            for i, ((action, mt5_type, price), tp) in enumerate(orders_tps, 1):
+                lot     = _calc_lot(account, symbol, instrument, price, sl)
+                filling = (
+                    mt5.ORDER_FILLING_IOC
+                    if action == mt5.TRADE_ACTION_DEAL
+                    else mt5.ORDER_FILLING_RETURN
+                )
+                request: dict = {
+                    "action":       action,
+                    "symbol":       symbol,
+                    "volume":       lot,
+                    "type":         mt5_type,
+                    "price":        price,
+                    "sl":           sl,
+                    "tp":           tp,
+                    "type_time":    mt5.ORDER_TIME_GTC,
+                    "type_filling": filling,
+                }
+                log.info(
+                    f"[{account['name']}] Sending TP{i}/{len(orders_tps)}: "
+                    f"{instrument} {signal['direction']} @ {price} SL={sl} TP={tp} lot={lot}"
+                )
+                result = mt5.order_send(request)
 
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                retcode = result.retcode if result else None
-                err     = result.comment if result else mt5.last_error()
-                log.error(f"order_send TP{i} failed retcode={retcode} err={err}: {instrument} {signal['direction']}")
-                continue
+                if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                    retcode = result.retcode if result else None
+                    err     = result.comment if result else mt5.last_error()
+                    log.error(
+                        f"[{account['name']}] order_send TP{i} failed"
+                        f" retcode={retcode} err={err}: {instrument} {signal['direction']}"
+                    )
+                    continue
 
-            tickets.append(result.order)
-            log.info(f"TP{i} order placed: ticket={result.order} {instrument} {signal['direction']} @ {price} TP={tp}")
+                tickets.append(result.order)
+                log.info(
+                    f"[{account['name']}] TP{i} placed: ticket={result.order}"
+                    f" {instrument} @ {price} TP={tp} lot={lot}"
+                )
 
-        if tickets:
-            _open[signal_id] = tickets
-            _save()
-            log.info(f"Signal {signal_id}: {len(tickets)}/{len(orders_tps)} orders placed — tickets={tickets}")
+            if tickets:
+                signal_tickets[account["name"]] = tickets
 
-    except Exception:
-        log.exception(f"place_order failed — signal_id={signal_id}")
+        except Exception:
+            log.exception(f"[{account['name']}] place_order failed — signal_id={signal_id}")
+        finally:
+            mt5.shutdown()
+
+    if signal_tickets:
+        _open[signal_id] = signal_tickets
+        _save()
+        total = sum(len(t) for t in signal_tickets.values())
+        log.info(
+            f"Signal {signal_id}: {total} orders placed across"
+            f" {len(signal_tickets)} account(s)"
+        )
 
 
 # ── TP1 hit — move remaining positions to breakeven ───────────────────────────
@@ -375,121 +596,150 @@ def _handle_tp_hit_sync(signal_id: str) -> None:
         return
 
     if not MOVE_SL_TO_BE_ON_TP1:
-        # Fallback: close all remaining positions (original tp_hit behaviour)
-        _handle_close_sync(signal_id)
+        _handle_close_sync(signal_id, "tp_hit")
         return
 
-    tickets = _open.get(signal_id)
-    if not tickets:
+    acc_tickets = _open.get(signal_id)
+    if not acc_tickets:
         log.warning(f"handle_tp_hit: no tracked tickets for signal_id={signal_id}")
         return
 
-    if not _connect():
-        return
+    for acc_name, tickets in list(acc_tickets.items()):
+        account = _account_by_name(acc_name)
+        if not account:
+            continue
 
-    try:
-        remaining = []
-        for ticket in list(tickets):
-            positions = mt5.positions_get(ticket=ticket)
-            if positions:
-                pos = positions[0]
-                result = mt5.order_send({
-                    "action":   mt5.TRADE_ACTION_SLTP,
-                    "position": pos.ticket,
-                    "sl":       pos.price_open,
-                    "tp":       pos.tp,
-                })
-                if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                    err = result.comment if result else mt5.last_error()
-                    log.error(f"Move SL to BE failed ({err}): ticket={ticket}")
-                else:
-                    log.info(f"SL moved to BE ({pos.price_open}): ticket={ticket} signal_id={signal_id}")
-                remaining.append(ticket)
-            else:
-                orders = mt5.orders_get(ticket=ticket)
-                if orders:
-                    # Pending order never filled — cancel it
-                    result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+        if not _connect(account):
+            mt5.shutdown()
+            continue
+
+        try:
+            remaining = []
+            for ticket in list(tickets):
+                positions = mt5.positions_get(ticket=ticket)
+                if positions:
+                    pos    = positions[0]
+                    result = mt5.order_send({
+                        "action":   mt5.TRADE_ACTION_SLTP,
+                        "position": pos.ticket,
+                        "sl":       pos.price_open,
+                        "tp":       pos.tp,
+                    })
                     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                         err = result.comment if result else mt5.last_error()
-                        log.error(f"Cancel pending on tp_hit failed ({err}): ticket={ticket}")
+                        log.error(f"[{acc_name}] Move SL to BE failed ({err}): ticket={ticket}")
                     else:
-                        log.info(f"Pending order cancelled on tp_hit: ticket={ticket} signal_id={signal_id}")
+                        log.info(
+                            f"[{acc_name}] SL moved to BE ({pos.price_open}):"
+                            f" ticket={ticket} signal_id={signal_id}"
+                        )
+                    remaining.append(ticket)
                 else:
-                    # Already auto-closed by MT5 when its TP was reached
-                    log.info(f"Ticket {ticket} closed by MT5 (TP reached): signal_id={signal_id}")
+                    orders = mt5.orders_get(ticket=ticket)
+                    if orders:
+                        result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+                        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                            err = result.comment if result else mt5.last_error()
+                            log.error(f"[{acc_name}] Cancel pending on tp_hit failed ({err}): ticket={ticket}")
+                        else:
+                            log.info(f"[{acc_name}] Pending cancelled on tp_hit: ticket={ticket} signal_id={signal_id}")
+                    else:
+                        log.info(f"[{acc_name}] Ticket {ticket} already closed by MT5: signal_id={signal_id}")
 
-        if remaining:
-            _open[signal_id] = remaining
-        else:
-            _open.pop(signal_id, None)
-        _save()
+            acc_tickets[acc_name] = remaining
 
-    except Exception:
-        log.exception(f"handle_tp_hit failed — signal_id={signal_id}")
+        except Exception:
+            log.exception(f"[{acc_name}] handle_tp_hit failed — signal_id={signal_id}")
+        finally:
+            mt5.shutdown()
+
+        # TP hit = win → reset the SL streak for this account
+        account["consecutive_sl"] = 0
+
+    _save_account_state()
+
+    if all(len(t) == 0 for t in acc_tickets.values()):
+        _open.pop(signal_id, None)
+    _save()
 
 
 # ── Close / cancel ─────────────────────────────────────────────────────────────
 
-async def handle_close(signal_id: str) -> None:
+async def handle_close(signal_id: str, update_type: str = "full_close") -> None:
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _handle_close_sync, signal_id)
+    await loop.run_in_executor(None, _handle_close_sync, signal_id, update_type)
 
 
-def _handle_close_sync(signal_id: str) -> None:
+def _handle_close_sync(signal_id: str, update_type: str = "full_close") -> None:
     if DRY_RUN:
-        log.info(f"[DRY RUN] handle_close — signal_id={signal_id}")
+        log.info(f"[DRY RUN] handle_close update_type={update_type} — signal_id={signal_id}")
         return
 
-    tickets = _open.get(signal_id)
-    if not tickets:
+    acc_tickets = _open.get(signal_id)
+    if not acc_tickets:
         log.warning(f"handle_close: no tracked tickets for signal_id={signal_id}")
         return
 
-    if not _connect():
-        return
+    for acc_name, tickets in list(acc_tickets.items()):
+        account = _account_by_name(acc_name)
+        if not account:
+            continue
 
-    try:
-        for ticket in list(tickets):
-            # Check for a live position first
-            positions = mt5.positions_get(ticket=ticket)
-            if positions:
-                pos        = positions[0]
-                close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                tick       = mt5.symbol_info_tick(pos.symbol)
-                price      = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
-                request = {
-                    "action":       mt5.TRADE_ACTION_DEAL,
-                    "symbol":       pos.symbol,
-                    "volume":       pos.volume,
-                    "type":         close_type,
-                    "position":     pos.ticket,
-                    "price":        price,
-                    "type_time":    mt5.ORDER_TIME_GTC,
-                    "type_filling": mt5.ORDER_FILLING_IOC,
-                }
-                result = mt5.order_send(request)
-                if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                    err = result.comment if result else mt5.last_error()
-                    log.error(f"Close failed ({err}): ticket={ticket}")
-                else:
-                    log.info(f"Position closed: ticket={ticket} signal_id={signal_id}")
+        if not _connect(account):
+            mt5.shutdown()
+            continue
 
-            else:
-                # Check for a pending order
-                orders = mt5.orders_get(ticket=ticket)
-                if orders:
-                    result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+        try:
+            for ticket in list(tickets):
+                positions = mt5.positions_get(ticket=ticket)
+                if positions:
+                    pos        = positions[0]
+                    close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                    tick       = mt5.symbol_info_tick(pos.symbol)
+                    price      = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+                    request    = {
+                        "action":       mt5.TRADE_ACTION_DEAL,
+                        "symbol":       pos.symbol,
+                        "volume":       pos.volume,
+                        "type":         close_type,
+                        "position":     pos.ticket,
+                        "price":        price,
+                        "type_time":    mt5.ORDER_TIME_GTC,
+                        "type_filling": mt5.ORDER_FILLING_IOC,
+                    }
+                    result = mt5.order_send(request)
                     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                         err = result.comment if result else mt5.last_error()
-                        log.error(f"Cancel failed ({err}): ticket={ticket}")
+                        log.error(f"[{acc_name}] Close failed ({err}): ticket={ticket}")
                     else:
-                        log.info(f"Pending order cancelled: ticket={ticket} signal_id={signal_id}")
+                        log.info(f"[{acc_name}] Position closed: ticket={ticket} signal_id={signal_id}")
                 else:
-                    log.warning(f"Ticket {ticket} not found — already closed/cancelled?")
+                    orders = mt5.orders_get(ticket=ticket)
+                    if orders:
+                        result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+                        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                            err = result.comment if result else mt5.last_error()
+                            log.error(f"[{acc_name}] Cancel failed ({err}): ticket={ticket}")
+                        else:
+                            log.info(f"[{acc_name}] Pending cancelled: ticket={ticket} signal_id={signal_id}")
+                    else:
+                        log.warning(f"[{acc_name}] Ticket {ticket} not found — already closed/cancelled?")
 
-    except Exception:
-        log.exception(f"handle_close failed — signal_id={signal_id}")
-    finally:
-        _open.pop(signal_id, None)
-        _save()
+        except Exception:
+            log.exception(f"[{acc_name}] handle_close failed — signal_id={signal_id}")
+        finally:
+            mt5.shutdown()
+
+        # Circuit breaker: SL hit increments streak; anything else (full_close, cancelled) does not
+        if update_type == "sl_hit":
+            account["consecutive_sl"] += 1
+            if account["consecutive_sl"] >= CIRCUIT_BREAKER_SL_LIMIT:
+                account["halted"] = True
+                log.warning(
+                    f"[{acc_name}] CIRCUIT BREAKER TRIPPED:"
+                    f" {CIRCUIT_BREAKER_SL_LIMIT} consecutive SLs — account halted until tomorrow"
+                )
+
+    _save_account_state()
+    _open.pop(signal_id, None)
+    _save()

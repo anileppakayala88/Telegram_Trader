@@ -84,7 +84,7 @@ def register_handlers(client, journal):
                         f"→ signal_id={sid or 'unlinked'}"
                     )
                     if entry["update_type"] in ("full_close", "sl_hit", "cancelled") and sid:
-                        asyncio.create_task(webhook.handle_close(sid))
+                        asyncio.create_task(webhook.handle_close(sid, entry["update_type"]))
                     elif entry["update_type"] == "tp_hit" and sid:
                         # Move remaining positions to breakeven (or close all if MOVE_SL_TO_BE_ON_TP1=false)
                         asyncio.create_task(webhook.handle_tp_hit(sid))
