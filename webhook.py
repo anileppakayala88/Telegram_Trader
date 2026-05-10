@@ -93,7 +93,7 @@ SYMBOL_MAP: dict[str, str] = {
     "CADCHF": "CADCHFm", "CHFJPY": "CHFJPYm",
     "XAUUSD": "XAUUSDm", "XAGUSD": "XAGUSDm",
     "BTCUSD": "BTCUSDm", "ETHUSD": "ETHUSDm",
-    "NAS100": "NAS100m", "US30":   "US30m",   "SPX500": "SPX500m",
+    "NAS100": "USTECm",  "US30":   "US30m",    "SPX500": "US500m",
 }
 
 # ── Feature flags ──────────────────────────────────────────────────────────────
