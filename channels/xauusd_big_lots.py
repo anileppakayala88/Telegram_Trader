@@ -7,8 +7,11 @@ CHANNEL_NAME = "XAUUSD VIP BIG LOTS"
 CHANNEL_ID = 1481325093
 
 # Matches: "XAUUSD Buy limit 4664/4656", "GOLD Buy from 4606/4598", etc.
+# Group 4: slash-separated second price (allows optional spaces around slash, e.g. "4722/ 4728")
+# Group 5: space-separated second price (e.g. "4740 4730")
 _SIGNAL_RE = re.compile(
-    r"^(?:XAUUSD|GOLD)[ \t]+(buy|sell)[ \t]+(limit|market|from)?[ \t]*([\d.]+)(?:/([\d.]+))?",
+    r"^(?:XAUUSD|GOLD)[ \t]+(buy|sell)[ \t]+(limit|market|from)?[ \t]*([\d.]+)"
+    r"(?:[ \t]*/[ \t]*([\d.]+)|[ \t]+([\d.]+))?",
     re.IGNORECASE,
 )
 _SL_RE = re.compile(r"^sl[ \t]+([\d.]+)", re.IGNORECASE)
@@ -80,7 +83,8 @@ def parse_signal(msg) -> dict | None:
     raw_type    = (m.group(2) or "market").lower()
     order_type  = "market" if raw_type == "from" else raw_type
     price1      = float(m.group(3))
-    price2      = float(m.group(4)) if m.group(4) else None
+    _p2         = m.group(4) or m.group(5)
+    price2      = float(_p2) if _p2 else None
 
     if price2:
         lo, hi = sorted([price1, price2])
