@@ -136,7 +136,7 @@ def parse_update(msg, signal_id: str | None) -> dict | None:
     elif _TP_HIT_RE.search(text):
         update_type = "tp_hit"
     elif _BE_HIT_RE.match(text):
-        update_type = "full_close"
+        update_type = "full_close"  # BE hit closes at 0 P&L — not a loss; must not penalise circuit breaker
     elif _MISSED_RE.search(text):
         update_type = "cancelled"
     elif _CLOSE_RE.search(text):

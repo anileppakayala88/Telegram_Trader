@@ -41,12 +41,14 @@ Reads trade signal messages from Telegram channels, parses them into structured 
 - Cache-backed: normalized message → result stored in `cache/classify_cache.json`
 - Falls back to `"commentary"` when ANTHROPIC_API_KEY is not set
 
-### Phase 4 — Multi-account routing + dynamic lot sizing (complete)
+### Phase 4 — Multi-account routing + dynamic lot sizing (code-complete on `phase3-multi-account`; not yet live)
 - Route signals to 6 MT5 accounts by asset class (2 accounts per class: commodity / forex / index)
 - Dynamic lot sizing: `lot = risk_amount / (sl_ticks × tick_value)` using live MT5 `symbol_info()`
 - Risk configured per asset class: `risk_pct` (% of equity) or `risk_usd` (fixed $ per trade)
 - Circuit breaker: account halted after N consecutive SL hits; resets at calendar day rollover
-- All account credentials and risk settings loaded from `.env`; dummy defaults in place until real creds provided
+- All account credentials and risk settings loaded from `.env`; accounts with `login=0` are skipped automatically
+- Kathy ZIP Forex Trades (channel 3) added — instrument-based signal linking, multi-close support
+- **Blocking go-live:** forex and index MT5 credentials not yet configured (commodity account active)
 
 ---
 
@@ -212,11 +214,13 @@ Both formats support optional direction prefix and multiple TPs. Direction infer
 - `Eu` → `EURUSD` (used in update messages)
 
 **Update / management messages (not new signals — classify as trade_update):**
-- `"Set be"` — move SL to breakeven
-- `"Close partial and set be"` — take partial profit, move SL to breakeven
+- `"Set be"` — move SL to breakeven (`breakeven`)
+- `"Close partial and set be"` — take partial profit, move SL to breakeven (`partial_close`)
 - `"Close partial and set sl as be"` — same
-- `"Keep Btc sl as be"` — reminder to hold breakeven SL
+- `"Keep Btc sl as be"` — reminder to hold breakeven SL (`breakeven`)
 - `"Am closing this Btc trade here"` — manual close (`full_close`)
+- `"Exit at be"` — position closed at breakeven (`full_close`)
+- `"Sl"` — bare word reply to a signal meaning SL was hit (`sl_hit`)
 - `"Tp1 hitted"` / `"Tp 1 hitted"` / `"Already hitted tp1"` / `"tapped"` — TP hit (`tp_hit`)
 - `"Btc slow price action"` — commentary
 - `"<instrument> close partials"` — partial close notification
@@ -257,12 +261,12 @@ TP 4615
 **Instrument:** XAUUSD only (sent as `XAUUSD` or `GOLD`)
 
 **Update / management messages (classify as trade_update):**
-- `"XAUUSD TP1 HIT RUNNING X PIPS"` — first TP reached
-- `"XAUUSD TP2 HIT RUNNING X PIPS"` — second TP reached
-- `"XAUUSD ALL TP HIT RUNNING X PIPS"` — all TPs hit
-- `"Be hit"` — stop loss moved to breakeven was hit
-- `"X PIPS PROFIT"` — running profit update
-- `"Missed close it"` / `"Just missed our limit"` / `"Missed"` / `"Delete"` — entry not triggered, cancel
+- `"XAUUSD TP1 HIT RUNNING X PIPS"` — first TP reached (`tp_hit`)
+- `"XAUUSD TP2 HIT RUNNING X PIPS"` — second TP reached (`tp_hit`)
+- `"XAUUSD ALL TP HIT RUNNING X PIPS"` — all TPs hit (`full_close`)
+- `"Be hit"` — breakeven SL was triggered; position closed at 0 P&L (`full_close`, **not** `sl_hit` — must not penalise circuit breaker)
+- `"X PIPS PROFIT"` — running profit update (noise)
+- `"Missed close it"` / `"Just missed our limit"` / `"Missed"` / `"Delete"` — entry not triggered (`cancelled`)
 
 **Noise messages (ignore):**
 - `"React ❤️"` — engagement prompt
@@ -419,6 +423,10 @@ CIRCUIT_BREAKER_SL_LIMIT=3   # consecutive SL hits before halting an account for
 - **Kathy ZIP instrument-based linking:** Kathy ZIP messages are never sent as replies, so `reply_to_msg_id` is always None. The `_instrument_to_signal` map in `JournalManager` links updates to signals by `(channel_id, instrument)` key. Updated on every new signal; `parse_update` returns `signal_id=None` and the listener resolves it after the fact.
 - **Kathy ZIP multi-close:** A single Kathy ZIP message can close several instruments. `parse_update` uses `re.MULTILINE` anchored patterns and returns `list[dict]` — one dict per instrument found. `listener.py` handles `list | dict` from all parsers.
 - **`update_type` passed to `handle_close`:** `listener.py` passes `entry["update_type"]` to `webhook.handle_close()` so the circuit breaker can distinguish `sl_hit` (increments streak) from `full_close` / `cancelled` (neutral).
+- **`"Be hit"` is `full_close`, not `sl_hit`:** Breakeven hit closes at 0 P&L — not a real loss. Classifying it as `sl_hit` would incorrectly count it against the circuit breaker streak. Same applies to `"exit at be"` in Vip Thrilokh.
+- **Bare `"Sl"` reply is `sl_hit`:** Vip Thrilokh sometimes posts a single word `"Sl"` as a reply to a signal. Matched by `^sl$` (reply-threaded so false positives are not possible) → `sl_hit`.
+- **Index price thousands-dot separator:** Vip Thrilokh sends US30/NAS100/SPX500 prices with `.` as thousands separator (e.g. `50.027` meaning 50,027). Detected by `_parse_price()`: if the instrument is an index and the raw string matches `\d+\.\d{3}` (exactly 3 decimal digits), the dot is stripped before `float()` conversion. Forex pairs with 3dp (e.g. `1.082`) are unaffected because they are not index instruments.
+- **NZDCAD and NZDCHF in webhook tables:** Both pairs appear in Kathy ZIP Forex Trades. Added to `SYMBOL_MAP` (`NZDCADm`, `NZDCHFm`), `PIP_SIZE` (0.0001), and `ENTRY_TOLERANCE_PIPS` (3 pips). Missing from `SYMBOL_MAP` would cause MT5 `symbol_info()` to return None and skip the order silently.
 
 ---
 
@@ -499,10 +507,11 @@ To add a new account group: add entries to the `ACCOUNTS` list in `webhook.py`, 
 
 ```
 per account:
-  SL hit  → consecutive_sl += 1
-             if consecutive_sl >= CIRCUIT_BREAKER_SL_LIMIT → halted = True
-  TP hit  → consecutive_sl = 0
-  new day → consecutive_sl = 0, halted = False
+  sl_hit              → consecutive_sl += 1
+                         if consecutive_sl >= CIRCUIT_BREAKER_SL_LIMIT → halted = True
+  tp_hit              → consecutive_sl = 0
+  full_close/cancelled → no change to streak (includes BE hits — not real losses)
+  new day (UTC)       → consecutive_sl = 0, halted = False
 
 at place_order:
   if account["halted"] → skip this account, log warning
@@ -632,7 +641,7 @@ Remove-Item "c:\Users\avaid\Downloads\Telegram_Trader-live\bot.pid"
 
 ## TODO (deferred)
 
+- [ ] **Phase 4 go-live:** plug in real forex MT5 credentials (`MT5_FOREX_1/2_*`) and index credentials (`MT5_INDEX_1/2_*`) in live `.env` — commodity account already active
 - [ ] Auto partial-close when channel sends "close partials" (Phase 2.1 remainder)
 - [ ] Online journal hosting (Google Sheets) — after trading is stable
 - [ ] Kathy ZIP Swing Trades (channel 2186423407) — separate channel, not yet onboarded
-- [ ] Plug in real MT5 credentials for all 6 accounts (`MT5_*_LOGIN/PASSWORD/SERVER` in `.env`)
