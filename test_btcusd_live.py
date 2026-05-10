@@ -1,15 +1,15 @@
 """
-BTCUSD test suite — no Telegram required.
+Full parser + MT5 order test suite — no Telegram required.
 
-Section 1: Parser unit tests
-  Hardcoded channel messages → assert classify + parse results.
+Section 1: Parser unit tests (44 cases across all 3 channels)
+  Vip Thrilokh  — new signals (4), updates (10), noise (4)
+  XAUUSD BIG LOTS — new signals (3), updates (10), noise (3)
+  Kathy ZIP     — new signals (3), updates (8), noise (2)
   No MT5 needed.
 
-Section 2: MT5 order tests
-  Connects to MT5, reads live BTCUSDm price, constructs 6 signals
-  covering every order type (market / limit / stop, both directions),
-  with SL and TP calculated from live price.
-  DRY_RUN by default; pass --live to place real orders.
+Section 2: MT5 order tests — live BTCUSDm price
+  6 signals covering every order type (market/limit/stop × BUY/SELL),
+  SL and TP derived from live price. DRY_RUN by default.
 
 Usage:
   python test_btcusd_live.py           # parser tests + MT5 dry-run
@@ -33,7 +33,9 @@ _llm_stub = types.ModuleType("llm_classify")
 _llm_stub.get_update_type = lambda text, ch: "noise"
 sys.modules.setdefault("llm_classify", _llm_stub)
 
-from channels import vip_thrilokh as parser
+from channels import vip_thrilokh as vt
+from channels import xauusd_big_lots as xbl
+from channels import kathy_zip_forex as kz
 import webhook
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -66,127 +68,203 @@ class _Msg:
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1 — Parser unit tests
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# Each entry: (parser_module, label, text, reply_to, exp_classify, exp_detail)
+#   new_signal   → exp_detail = (direction, instrument, entry, sl, tp[0])
+#   trade_update → exp_detail = update_type string OR list of update_type strings
+#                               (list used for multi-close Kathy ZIP messages)
+#   noise        → exp_detail = None
 
-# Each entry: (label, message_text, reply_to, expected_classify, expected_update_type_or_parse)
-# For new_signal rows:  expected field = (direction, instrument, entry, sl, tp[0])
-# For trade_update rows: expected field = update_type string
-# For noise rows:        expected field = None
 _PARSER_CASES = [
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # VIP THRILOKH
+    # ══════════════════════════════════════════════════════════════════════════
+
     # ── New signals ──────────────────────────────────────────────────────────
-    (
-        "SELL BTC — direction inferred from SL > entry",
-        "Btc @ 74220\nSl  @ 75647\nTp. @ 70450",
-        None,
-        "new_signal",
-        ("SELL", "BTCUSD", 74220.0, 75647.0, 70450.0),
-    ),
-    (
-        "SELL BTC — explicit direction prefix",
-        "Sell Btc @ 74220\nSl @ 73000\nTp @ 70450",
-        None,
-        "new_signal",
-        ("SELL", "BTCUSD", 74220.0, 73000.0, 70450.0),
-    ),
-    (
-        "BUY BTC — direction inferred from SL < entry",
-        "Btc @ 74220\nSl @ 72000\nTp @ 78000",
-        None,
-        "new_signal",
-        ("BUY", "BTCUSD", 74220.0, 72000.0, 78000.0),
-    ),
-    (
-        "BTC signal with leading emoji",
-        "🔥Btc @ 74220\nSl @ 75647\nTp @ 70450",
-        None,
-        "new_signal",
-        ("SELL", "BTCUSD", 74220.0, 75647.0, 70450.0),
-    ),
+    (vt, "VT: SELL BTC — direction inferred from SL > entry",
+         "Btc @ 74220\nSl  @ 75647\nTp. @ 70450", None,
+         "new_signal", ("SELL", "BTCUSD", 74220.0, 75647.0, 70450.0)),
+
+    (vt, "VT: BUY BTC — direction inferred from SL < entry",
+         "Btc @ 74220\nSl @ 72000\nTp @ 78000", None,
+         "new_signal", ("BUY", "BTCUSD", 74220.0, 72000.0, 78000.0)),
+
+    (vt, "VT: SELL BTC — explicit direction prefix",
+         "Sell Btc @ 74220\nSl @ 73000\nTp @ 70450", None,
+         "new_signal", ("SELL", "BTCUSD", 74220.0, 73000.0, 70450.0)),
+
+    (vt, "VT: BTC signal with leading emoji",
+         "🔥Btc @ 74220\nSl @ 75647\nTp @ 70450", None,
+         "new_signal", ("SELL", "BTCUSD", 74220.0, 75647.0, 70450.0)),
+
     # ── Trade updates ─────────────────────────────────────────────────────────
-    (
-        "Breakeven reminder",
-        "Keep Btc sl as be",
-        123,
-        "trade_update",
-        "breakeven",
-    ),
-    (
-        "Full close — 'closing this' phrasing",
-        "Am closing this Btc trade here",
-        123,
-        "trade_update",
-        "full_close",
-    ),
-    (
-        "Full close — 'close here' phrasing",
-        "close here",
-        123,
-        "trade_update",
-        "full_close",
-    ),
-    (
-        "Exit at breakeven → full_close (not sl_hit)",
-        "exit at be",
-        123,
-        "trade_update",
-        "full_close",
-    ),
-    (
-        "TP hit — 'tapped'",
-        "Btc 50% tapped",
-        123,
-        "trade_update",
-        "tp_hit",
-    ),
-    (
-        "TP hit — 'tp1 hitted'",
-        "Tp1 hitted",
-        123,
-        "trade_update",
-        "tp_hit",
-    ),
-    (
-        "SL hit — bare 'Sl' reply",
-        "Sl",
-        123,
-        "trade_update",
-        "sl_hit",
-    ),
-    (
-        "Partial close",
-        "Close partial and set be",
-        123,
-        "trade_update",
-        "partial_close",
-    ),
-    # ── Noise ────────────────────────────────────────────────────────────────
-    (
-        "Noise — market commentary",
-        "Btc is pushing",
-        None,
-        "noise",
-        None,
-    ),
-    (
-        "Noise — expectation message",
-        "Btc expectation",
-        None,
-        "noise",
-        None,
-    ),
-    (
-        "Noise — emoji only",
-        "🔥🚀",
-        None,
-        "noise",
-        None,
-    ),
-    (
-        "Noise — weekly RR summary",
-        "VIP signal trades\nTotal RR 1:3 this week",
-        None,
-        "noise",
-        None,
-    ),
+    (vt, "VT: all tp hit → full_close",
+         "all tp hit", 123, "trade_update", "full_close"),
+
+    (vt, "VT: all tp hitted → full_close",
+         "all tp hitted", 123, "trade_update", "full_close"),
+
+    (vt, "VT: closing this → full_close",
+         "Am closing this Btc trade here", 123, "trade_update", "full_close"),
+
+    (vt, "VT: close here → full_close",
+         "close here", 123, "trade_update", "full_close"),
+
+    (vt, "VT: close now → full_close",
+         "close now", 123, "trade_update", "full_close"),
+
+    (vt, "VT: bare 'close' → full_close",
+         "close", 123, "trade_update", "full_close"),
+
+    (vt, "VT: exit at be → full_close (not sl_hit)",
+         "exit at be", 123, "trade_update", "full_close"),
+
+    (vt, "VT: set be → breakeven",
+         "set be", 123, "trade_update", "breakeven"),
+
+    (vt, "VT: sl as be → breakeven",
+         "sl as be", 123, "trade_update", "breakeven"),
+
+    (vt, "VT: close partial and set be → partial_close",
+         "Close partial and set be", 123, "trade_update", "partial_close"),
+
+    (vt, "VT: tapped → tp_hit",
+         "Btc 50% tapped", 123, "trade_update", "tp_hit"),
+
+    (vt, "VT: tp1 hitted → tp_hit",
+         "Tp1 hitted", 123, "trade_update", "tp_hit"),
+
+    (vt, "VT: Tp 1 hitted (with space) → tp_hit",
+         "Tp 1 hitted", 123, "trade_update", "tp_hit"),
+
+    (vt, "VT: Already hitted tp1 → tp_hit",
+         "Already hitted tp1", 123, "trade_update", "tp_hit"),
+
+    (vt, "VT: bare 'Sl' reply → sl_hit",
+         "Sl", 123, "trade_update", "sl_hit"),
+
+    # ── Noise ─────────────────────────────────────────────────────────────────
+    (vt, "VT: noise — market commentary",
+         "Btc is pushing", None, "noise", None),
+
+    (vt, "VT: noise — expectation",
+         "Btc expectation", None, "noise", None),
+
+    (vt, "VT: noise — emoji only",
+         "🔥🚀", None, "noise", None),
+
+    (vt, "VT: noise — weekly RR summary",
+         "VIP signal trades\nTotal RR 1:3 this week", None, "noise", None),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # XAUUSD VIP BIG LOTS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── New signals ──────────────────────────────────────────────────────────
+    (xbl, "XBL: XAUUSD buy limit with range",
+          "XAUUSD Buy limit 4664/4656\nSl 4643\nTP 4669\nTP 4676", None,
+          "new_signal", ("BUY", "XAUUSD", 4656.0, 4643.0, 4669.0)),
+
+    (xbl, "XBL: GOLD Buy from (market order alias)",
+          "GOLD Buy from 4606/4598\nSl 4585\nTP 4615", None,
+          "new_signal", ("BUY", "XAUUSD", 4598.0, 4585.0, 4615.0)),
+
+    (xbl, "XBL: XAUUSD sell single entry",
+          "XAUUSD Sell 4700\nSl 4720\nTP 4650", None,
+          "new_signal", ("SELL", "XAUUSD", 4700.0, 4720.0, 4650.0)),
+
+    # ── Trade updates ─────────────────────────────────────────────────────────
+    (xbl, "XBL: ALL TP HIT → full_close",
+          "XAUUSD ALL TP HIT RUNNING 200 PIPS", None, "trade_update", "full_close"),
+
+    (xbl, "XBL: TP1 HIT → tp_hit",
+          "XAUUSD TP1 HIT RUNNING 50 PIPS", None, "trade_update", "tp_hit"),
+
+    (xbl, "XBL: TP2 HIT → tp_hit",
+          "XAUUSD TP2 HIT RUNNING 100 PIPS", None, "trade_update", "tp_hit"),
+
+    (xbl, "XBL: Be hit → full_close (not sl_hit)",
+          "Be hit", None, "trade_update", "full_close"),
+
+    (xbl, "XBL: be hit lowercase → full_close",
+          "be hit", None, "trade_update", "full_close"),
+
+    (xbl, "XBL: Missed close it → cancelled",
+          "Missed close it", None, "trade_update", "cancelled"),
+
+    (xbl, "XBL: Just missed our limit → cancelled",
+          "Just missed our limit", None, "trade_update", "cancelled"),
+
+    (xbl, "XBL: Missed → cancelled",
+          "Missed", None, "trade_update", "cancelled"),
+
+    (xbl, "XBL: Delete → cancelled",
+          "Delete", None, "trade_update", "cancelled"),
+
+    (xbl, "XBL: Close now → full_close",
+          "Close now", None, "trade_update", "full_close"),
+
+    # ── Noise ─────────────────────────────────────────────────────────────────
+    (xbl, "XBL: noise — React",
+          "React ❤️", None, "noise", None),
+
+    (xbl, "XBL: noise — I'm in",
+          "I'm in", None, "noise", None),
+
+    (xbl, "XBL: noise — Go again",
+          "Go again", None, "noise", None),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # KATHY ZIP FOREX TRADES
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── New signals ──────────────────────────────────────────────────────────
+    (kz, "KZ: NEW TRADE sell USDJPY",
+         "NEW TRADE\n\n📈  Entry: Sell 2 unit USDJPY at 159.36\n🚫  Stop at 159.56\n🎯  Exit at 159.16",
+         None, "new_signal", ("SELL", "USDJPY", 159.36, 159.56, 159.16)),
+
+    (kz, "KZ: NEW TRADE buy EURUSD",
+         "NEW TRADE\n\n📈  Entry: Buy 2 unit EURUSD at 1.1726\n🚫  Stop at 1.1706\n🎯  Exit at 1.1756",
+         None, "new_signal", ("BUY", "EURUSD", 1.1726, 1.1706, 1.1756)),
+
+    (kz, "KZ: NEW TRADE sell NZDCAD (broker symbol fix)",
+         "NEW TRADE\n\n📈  Entry: Sell 1 unit NZDCAD at 0.7997\n🚫  Stop at 0.8017\n🎯  Exit at 0.7977",
+         None, "new_signal", ("SELL", "NZDCAD", 0.7997, 0.8017, 0.7977)),
+
+    # ── Trade updates ─────────────────────────────────────────────────────────
+    (kz, "KZ: CLOSE INSTRUMENT AT PRICE → full_close",
+         "CLOSE EURJPY AT 186.80", None, "trade_update", ["full_close"]),
+
+    (kz, "KZ: Close INSTRUMENT at price with comment → full_close",
+         "Close EURUSD at 1.1715 - not working out", None, "trade_update", ["full_close"]),
+
+    (kz, "KZ: Close 1/2 → full_close (partial)",
+         "Close 1/2 NZDJPY at 93.77", None, "trade_update", ["full_close"]),
+
+    (kz, "KZ: Close rest of → full_close",
+         "Close rest of NZDJPY at 93.73", None, "trade_update", ["full_close"]),
+
+    (kz, "KZ: Stopped on → sl_hit",
+         "Stopped on EURJPY", None, "trade_update", ["sl_hit"]),
+
+    (kz, "KZ: TARGET HIT → tp_hit",
+         "CHFJPY 🎯TARGET HIT", None, "trade_update", ["tp_hit"]),
+
+    (kz, "KZ: two TARGET HITs in one message",
+         "CHFJPY 🎯TARGET HIT\nUSDCHF 🎯TARGET HIT", None, "trade_update", ["tp_hit", "tp_hit"]),
+
+    (kz, "KZ: multi-close — 2 closes + 1 stopped",
+         "Close NZDCAD at 0.8006 - not enough momentum\nClose EURCHF at 0.9153\nStopped on EURJPY",
+         None, "trade_update", ["full_close", "full_close", "sl_hit"]),
+
+    # ── Noise ─────────────────────────────────────────────────────────────────
+    (kz, "KZ: noise — weekly pip summary",
+         "EURUSD +15\nAUDUSD +22\nTotal +137 pips this week", None, "noise", None),
+
+    (kz, "KZ: noise — commentary block",
+         "Here are the reasons why I like selling USDJPY:\n1. USD safe haven bid eases",
+         None, "noise", None),
 ]
 
 
@@ -196,12 +274,12 @@ def run_parser_tests() -> tuple[int, int]:
 
     log.info("")
     log.info("=" * 60)
-    log.info("SECTION 1 — Parser unit tests")
+    log.info(f"SECTION 1 — Parser unit tests ({len(_PARSER_CASES)} cases)")
     log.info("=" * 60)
 
-    for label, text, reply_to, exp_classify, exp_detail in _PARSER_CASES:
+    for p, label, text, reply_to, exp_classify, exp_detail in _PARSER_CASES:
         msg    = _Msg(text, reply_to=reply_to)
-        result = parser.classify(msg)
+        result = p.classify(msg)
 
         if result != exp_classify:
             log.error(f"FAIL  {label}")
@@ -210,7 +288,7 @@ def run_parser_tests() -> tuple[int, int]:
             continue
 
         if exp_classify == "new_signal":
-            parsed = parser.parse_signal(msg)
+            parsed = p.parse_signal(msg)
             if parsed is None:
                 log.error(f"FAIL  {label}")
                 log.error("      parse_signal returned None")
@@ -241,14 +319,16 @@ def run_parser_tests() -> tuple[int, int]:
                 failed += 1
 
         elif exp_classify == "trade_update":
-            upd  = parser.parse_update(msg, "fake-signal-id")
-            utype = (upd if isinstance(upd, dict) else upd[0])["update_type"]
-            if utype == exp_detail:
-                log.info(f"PASS  {label}\n      update_type={utype}")
+            upd     = p.parse_update(msg, "fake-signal-id")
+            updates = upd if isinstance(upd, list) else [upd]
+            actual  = [u["update_type"] for u in updates]
+            exp_list = exp_detail if isinstance(exp_detail, list) else [exp_detail]
+            if actual == exp_list:
+                log.info(f"PASS  {label}\n      update_type={actual}")
                 passed += 1
             else:
                 log.error(f"FAIL  {label}")
-                log.error(f"      update_type: got={utype!r}  expected={exp_detail!r}")
+                log.error(f"      got={actual}  expected={exp_list}")
                 failed += 1
 
         else:  # noise
