@@ -86,8 +86,10 @@ _PIPE_TP_RE = re.compile(r"\|[ \t]*tp\d*[ \t]*@?[ \t]*([\d.]+)", re.IGNORECASE)
 _UPDATE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\ball\s+tp\s+hit|all\s+tp\s+hitted",   re.I),       "full_close"),
     (re.compile(r"\bclosing\s+this\b|\bclose\s+(here|full|now|trade)\b", re.I), "full_close"),
+    (re.compile(r"\bexit\s+at\s+be\b",                   re.I),       "full_close"),
     (re.compile(r"\bclose\s+partials?\b",                 re.I),       "partial_close"),
     (re.compile(r"^close$",                               re.I),       "full_close"),
+    (re.compile(r"^sl$",                                  re.I),       "sl_hit"),
     (re.compile(r"\bsl\s+(as\s+)?be\b|\bset\s+be\b",     re.I),       "breakeven"),
     (re.compile(r"\btapped\b"
                 r"|\btp\s*\d*\s+hitted?\b"   # "Tp1 hitted", "Tp 1 hitted"
