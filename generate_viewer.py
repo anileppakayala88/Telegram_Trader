@@ -1,7 +1,15 @@
-import json
+import json, os
+
+journals = [
+    'journal/vip_thrilokh.jsonl',
+    'journal/xauusd_big_lots.jsonl',
+    'journal/kathy_zip_forex.jsonl',
+]
 
 rows = []
-for path in ['journal/vip_thrilokh.jsonl', 'journal/xauusd_big_lots.jsonl']:
+for path in journals:
+    if not os.path.exists(path):
+        continue
     with open(path, encoding='utf-8') as f:
         for line in f:
             line = line.strip()

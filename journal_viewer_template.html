@@ -9,14 +9,24 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d
 header{background:#161b22;border-bottom:1px solid #21262d;padding:14px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 h1{font-size:1.1rem;font-weight:600;color:#e6edf3}
 .pill{font-size:.72rem;padding:2px 9px;border-radius:20px;background:#21262d;color:#8b949e;font-weight:600}
-.summary{display:flex;gap:0;background:#161b22;border-bottom:2px solid #21262d;overflow-x:auto}
+.summary{display:flex;gap:0;background:#161b22;border-bottom:2px solid #21262d;overflow-x:auto;flex-wrap:wrap}
 .stat{display:flex;flex-direction:column;align-items:center;padding:10px 22px;gap:2px;border-right:1px solid #21262d}
 .stat:last-child{border-right:none}
 .stat-val{font-size:1.4rem;font-weight:700}
 .stat-lbl{font-size:.62rem;color:#6e7681;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+.pnl-bar{display:flex;align-items:center;gap:0;background:#0d1117;border-bottom:2px solid #21262d;padding:10px 20px;flex-wrap:wrap;gap:24px}
+.pnl-block{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:80px}
+.pnl-val{font-size:1.6rem;font-weight:700}
+.pnl-lbl{font-size:.62rem;color:#6e7681;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+.win-bar-wrap{flex:1;min-width:200px;display:flex;flex-direction:column;gap:5px}
+.win-bar-label{font-size:.68rem;color:#6e7681;display:flex;justify-content:space-between}
+.win-bar-bg{height:8px;background:#21262d;border-radius:4px;overflow:hidden}
+.win-bar-fill{height:100%;border-radius:4px;transition:width .3s}
+.pnl-divider{width:1px;height:44px;background:#21262d;align-self:center}
 .controls{background:#0d1117;border-bottom:1px solid #21262d;padding:9px 20px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
-select,input[type=text]{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:5px 9px;border-radius:6px;font-size:.78rem;outline:none}
+select,input[type=text],input[type=date]{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:5px 9px;border-radius:6px;font-size:.78rem;outline:none}
 select:focus,input:focus{border-color:#388bfd}
+input[type=date]{color-scheme:dark}
 .ctrl-lbl{font-size:.7rem;color:#6e7681}
 .ctrl-g{display:flex;align-items:center;gap:5px}
 #count{margin-left:auto;font-size:.73rem;color:#6e7681}
@@ -43,6 +53,7 @@ tbody tr:hover td{background:#161b22}
 .u-commentary{color:#6e7681}
 .ch-t{color:#a371f7;font-size:.71rem}
 .ch-x{color:#e3b341;font-size:.71rem}
+.ch-k{color:#58a6ff;font-size:.71rem}
 .ts{color:#6e7681;font-size:.71rem;white-space:nowrap}
 .mono{font-family:monospace;font-size:.76rem}
 .tp-c{font-family:monospace;font-size:.72rem;color:#8b949e}
@@ -55,15 +66,22 @@ tbody tr:hover td{background:#161b22}
 <header>
   <h1>Trade Journal</h1>
   <span class="pill" id="hdr-total"></span>
-  <span style="font-size:.75rem;color:#6e7681">Vip Thrilokh + XAUUSD VIP BIG LOTS</span>
+  <span style="font-size:.75rem;color:#6e7681">Vip Thrilokh · XAUUSD VIP BIG LOTS · Kathy ZIP</span>
+  <span style="margin-left:auto;font-size:.7rem;color:#444" id="hdr-range"></span>
 </header>
 <div class="summary" id="summary"></div>
+<div class="pnl-bar" id="pnl-bar"></div>
 <div class="controls">
+  <div class="ctrl-g"><span class="ctrl-lbl">From</span>
+    <input type="date" id="f-from"></div>
+  <div class="ctrl-g"><span class="ctrl-lbl">To</span>
+    <input type="date" id="f-to"></div>
   <div class="ctrl-g"><span class="ctrl-lbl">Channel</span>
     <select id="f-ch">
       <option value="">All</option>
       <option value="Vip Thrilokh">Vip Thrilokh</option>
       <option value="XAUUSD VIP BIG LOTS">XAU Big Lots</option>
+      <option value="Kathy ZIP Forex Trades">Kathy ZIP</option>
     </select></div>
   <div class="ctrl-g"><span class="ctrl-lbl">Type</span>
     <select id="f-type">
@@ -90,6 +108,7 @@ tbody tr:hover td{background:#161b22}
     </select></div>
   <div class="ctrl-g"><span class="ctrl-lbl">Instrument</span>
     <input type="text" id="f-inst" placeholder="XAUUSD…" style="width:90px"></div>
+  <button onclick="clearFilters()" style="background:#21262d;border:1px solid #30363d;color:#8b949e;padding:5px 11px;border-radius:6px;font-size:.75rem;cursor:pointer">Clear</button>
   <span id="count"></span>
 </div>
 <div class="wrap">
@@ -106,23 +125,112 @@ tbody tr:hover td{background:#161b22}
 const DATA = __DATA_PLACEHOLDER__;
 const rows = DATA.sort((a,b)=>a.timestamp<b.timestamp?-1:1);
 
-const n=t=>rows.filter(r=>r.update_type===t).length;
-const nSig=rows.filter(r=>r.message_type==='new_signal').length;
-const nUpd=rows.filter(r=>r.message_type==='trade_update').length;
+// ── header date range ──────────────────────────────────────────────────────
+if(rows.length){
+  const first=rows[0].timestamp.slice(0,10);
+  const last=rows[rows.length-1].timestamp.slice(0,10);
+  document.getElementById('hdr-range').textContent=first+' → '+last;
+}
 document.getElementById('hdr-total').textContent=rows.length+' entries';
-const stats=[
-  ['Signals',nSig,'#3fb950'],['Updates',nUpd,'#388bfd'],
-  ['TP Hits',n('tp_hit'),'#3fb950'],['Full Close',n('full_close'),'#3fb950'],
-  ['SL Hits',n('sl_hit'),'#f85149'],['Cancelled',n('cancelled'),'#e3b341'],
-  ['Breakeven',n('breakeven'),'#58a6ff'],['Partial',n('partial_close'),'#a371f7'],
-];
-document.getElementById('summary').innerHTML=stats.map(([l,v,c])=>
-  `<div class="stat"><div class="stat-val" style="color:${c}">${v}</div><div class="stat-lbl">${l}</div></div>`
-).join('');
 
-['f-ch','f-type','f-dir','f-upd','f-inst'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+// ── static summary bar ─────────────────────────────────────────────────────
+function buildSummary(rs){
+  const n=t=>rs.filter(r=>r.update_type===t).length;
+  const nSig=rs.filter(r=>r.message_type==='new_signal').length;
+  const nUpd=rs.filter(r=>r.message_type==='trade_update').length;
+  const stats=[
+    ['Signals',nSig,'#3fb950'],['Updates',nUpd,'#388bfd'],
+    ['TP Hits',n('tp_hit'),'#3fb950'],['Full Close',n('full_close'),'#3fb950'],
+    ['SL Hits',n('sl_hit'),'#f85149'],['Cancelled',n('cancelled'),'#e3b341'],
+    ['Breakeven',n('breakeven'),'#58a6ff'],['Partial',n('partial_close'),'#a371f7'],
+  ];
+  document.getElementById('summary').innerHTML=stats.map(([l,v,c])=>
+    `<div class="stat"><div class="stat-val" style="color:${c}">${v}</div><div class="stat-lbl">${l}</div></div>`
+  ).join('');
+}
+
+// ── PnL / outcome bar (pip-based estimate) ─────────────────────────────────
+// Matches each signal to its updates by signal_id, then computes pip outcome
+// using the first full_close / sl_hit update to determine outcome direction.
+// Pip value uses: tp1 hit → distance(entry→tp1), sl hit → distance(entry→sl)
+// Note: only signals with both entry+sl+tp can contribute.
+function buildPnlBar(rs){
+  const sigMap={};
+  rs.forEach(r=>{
+    if(r.message_type==='new_signal'&&r.signal_id) sigMap[r.signal_id]=r;
+  });
+
+  let wins=0,losses=0,pipWin=0,pipLoss=0;
+  const closedSigs=new Set();
+
+  rs.forEach(r=>{
+    if(r.message_type!=='trade_update'||!r.signal_id) return;
+    const sig=sigMap[r.signal_id];
+    if(!sig) return;
+    const ut=r.update_type;
+    if(ut==='full_close'||ut==='tp_hit'){
+      if(!closedSigs.has(r.signal_id)){
+        wins++;
+        if(sig.entry!=null&&sig.tp&&sig.tp.length){
+          pipWin+=Math.abs(sig.tp[0]-sig.entry);
+        }
+        if(ut==='full_close') closedSigs.add(r.signal_id);
+      }
+    } else if(ut==='sl_hit'){
+      if(!closedSigs.has(r.signal_id)){
+        losses++;
+        if(sig.entry!=null&&sig.sl!=null){
+          pipLoss+=Math.abs(sig.entry-sig.sl);
+        }
+        closedSigs.add(r.signal_id);
+      }
+    }
+  });
+
+  const total=wins+losses;
+  const wr=total?Math.round(wins/total*100):0;
+  const wrColor=wr>=60?'#3fb950':wr>=45?'#e3b341':'#f85149';
+  const netPips=pipWin-pipLoss;
+  const netColor=netPips>=0?'#3fb950':'#f85149';
+  const bar=document.getElementById('pnl-bar');
+  if(total===0){bar.innerHTML='<span style="font-size:.75rem;color:#444;padding:4px 0">No closed trades in view</span>';return;}
+  bar.innerHTML=`
+    <div class="pnl-block"><div class="pnl-val" style="color:#3fb950">${wins}</div><div class="pnl-lbl">Wins</div></div>
+    <div class="pnl-block"><div class="pnl-val" style="color:#f85149">${losses}</div><div class="pnl-lbl">Losses</div></div>
+    <div class="pnl-divider"></div>
+    <div class="pnl-block"><div class="pnl-val" style="color:${wrColor}">${wr}%</div><div class="pnl-lbl">Win Rate</div></div>
+    <div class="pnl-divider"></div>
+    <div class="pnl-block"><div class="pnl-val" style="color:${netColor};font-size:1.3rem">${netPips>=0?'+':''}${netPips.toFixed(1)}</div><div class="pnl-lbl">Net Pips (est.)</div></div>
+    <div class="win-bar-wrap">
+      <div class="win-bar-label"><span style="color:#3fb950">${wins} W</span><span style="color:#f85149">${losses} L</span></div>
+      <div class="win-bar-bg"><div class="win-bar-fill" style="width:${wr}%;background:${wrColor}"></div></div>
+      <div style="font-size:.64rem;color:#444;margin-top:2px">based on ${total} closed signal${total!==1?'s':''} · pip distances are approximate</div>
+    </div>`;
+}
+
+// ── filter inputs ──────────────────────────────────────────────────────────
+['f-ch','f-type','f-dir','f-upd','f-inst','f-from','f-to'].forEach(id=>
+  document.getElementById(id).addEventListener('input',render));
+
+function clearFilters(){
+  ['f-ch','f-type','f-dir','f-upd'].forEach(id=>document.getElementById(id).value='');
+  ['f-inst','f-from','f-to'].forEach(id=>document.getElementById(id).value='');
+  render();
+}
 
 function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+function chClass(name){
+  if(name==='Vip Thrilokh') return 'ch-t';
+  if(name==='XAUUSD VIP BIG LOTS') return 'ch-x';
+  return 'ch-k';
+}
+function chLabel(name){
+  if(name==='Vip Thrilokh') return 'Vip Thrilokh';
+  if(name==='XAUUSD VIP BIG LOTS') return 'XAU Big Lots';
+  if(name==='Kathy ZIP Forex Trades') return 'Kathy ZIP';
+  return name;
+}
 
 function render(){
   const fCh=document.getElementById('f-ch').value;
@@ -130,15 +238,25 @@ function render(){
   const fDir=document.getElementById('f-dir').value;
   const fUp=document.getElementById('f-upd').value;
   const fIn=document.getElementById('f-inst').value.toUpperCase();
+  const fFrom=document.getElementById('f-from').value;
+  const fTo=document.getElementById('f-to').value;
+
   const filtered=rows.filter(r=>{
     if(fCh&&r.source_channel_name!==fCh)return false;
     if(fTy&&r.message_type!==fTy)return false;
     if(fDir&&r.direction!==fDir)return false;
     if(fUp&&r.update_type!==fUp)return false;
     if(fIn&&!(r.instrument||'').includes(fIn))return false;
+    const d=r.timestamp.slice(0,10);
+    if(fFrom&&d<fFrom)return false;
+    if(fTo&&d>fTo)return false;
     return true;
   });
+
   document.getElementById('count').textContent=filtered.length+' of '+rows.length;
+  buildSummary(filtered);
+  buildPnlBar(filtered);
+
   const tbody=document.getElementById('tbody');
   tbody.innerHTML='';
   let prevSid=undefined;
@@ -148,8 +266,6 @@ function render(){
     if(r.signal_id!==prevSid)tr.className='gs';
     prevSid=r.signal_id;
     const ts=r.timestamp.replace('T',' ').replace(/\+.*/,'').slice(0,16);
-    const chC=r.source_channel_name==='Vip Thrilokh'?'ch-t':'ch-x';
-    const chL=r.source_channel_name==='Vip Thrilokh'?'Vip Thrilokh':'XAU Big Lots';
     const tp=Array.isArray(r.tp)&&r.tp.length?r.tp.join(' › '):'—';
     const range=r.entry_range?`<br><span style="color:#444;font-size:.64rem">${r.entry_range[0]}–${r.entry_range[1]}</span>`:'';
     const status=isSig
@@ -161,7 +277,7 @@ function render(){
     tr.innerHTML=`
       <td style="color:#555;font-size:.69rem">${i+1}</td>
       <td class="ts">${ts}</td>
-      <td><span class="${chC}">${chL}</span></td>
+      <td><span class="${chClass(r.source_channel_name)}">${chLabel(r.source_channel_name)}</span></td>
       <td>${isSig?'<span class="b b-sig">signal</span>':'<span class="b b-upd">update</span>'}</td>
       <td style="font-weight:${isSig?600:400};color:${isSig?'#e6edf3':'#8b949e'}">${r.instrument||'<span class="dim">—</span>'}</td>
       <td>${r.direction?`<span class="b b-${r.direction}">${r.direction}</span>`:'<span class="dim">—</span>'}</td>
