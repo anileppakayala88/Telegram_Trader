@@ -95,6 +95,19 @@ _UPDATE_PATTERNS: list[tuple[re.Pattern, str]] = [
                 re.I),                                               "tp_hit"),
 ]
 
+_INDEX_INSTRUMENTS = {"NAS100", "US30", "SPX500"}
+
+# Matches "50.027" style thousands-separated index prices (exactly 3 decimal digits).
+# Real index decimals are 0-2 places; 3 digits after dot = thousands separator.
+_THOUSANDS_DOT_RE = re.compile(r'^\d+\.\d{3}$')
+
+
+def _parse_price(raw: str, instrument: str) -> float:
+    if instrument in _INDEX_INSTRUMENTS and _THOUSANDS_DOT_RE.match(raw):
+        return float(raw.replace('.', ''))
+    return float(raw)
+
+
 _NOISE_RE = re.compile(
     r"^[\W\s]+$"                  # emoji/whitespace only
     r"|vip signal trades"
@@ -146,23 +159,23 @@ def parse_signal(msg) -> dict | None:
     if m:
         dir_before, instrument_raw, dir_after, entry_raw, sl_raw, _ = m.groups()
         instrument    = _normalise(instrument_raw)
-        entry         = float(entry_raw)
-        sl            = float(sl_raw)
+        entry         = _parse_price(entry_raw, instrument)
+        sl            = _parse_price(sl_raw, instrument)
         direction_raw = dir_before or dir_after
         direction     = direction_raw.upper() if direction_raw else ("SELL" if sl > entry else "BUY")
-        tps           = [float(x) for x in _TP_RE.findall(text)]
+        tps           = [_parse_price(x, instrument) for x in _TP_RE.findall(text)]
     else:
         m = _PIPE_SIGNAL_RE.search(text)
         if not m:
             return None
         dir_prefix, instrument_raw, entry_raw, sl_raw, _ = m.groups()
         instrument = _normalise(instrument_raw)
-        entry      = float(entry_raw)
-        sl         = float(sl_raw)
+        entry      = _parse_price(entry_raw, instrument)
+        sl         = _parse_price(sl_raw, instrument)
         direction  = dir_prefix.upper() if dir_prefix else ("SELL" if sl > entry else "BUY")
         line_end   = text.find('\n', m.start())
         line       = text[m.start():] if line_end == -1 else text[m.start():line_end]
-        tps        = [float(x) for x in _PIPE_TP_RE.findall(line)]
+        tps        = [_parse_price(x, instrument) for x in _PIPE_TP_RE.findall(line)]
 
     return {
         "signal_id":           str(uuid.uuid4()),
