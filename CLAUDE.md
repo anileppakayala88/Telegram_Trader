@@ -409,6 +409,8 @@ CIRCUIT_BREAKER_SL_LIMIT=3   # consecutive SL hits before halting an account for
 - **Restart loop in main.py:** `asyncio.run(main())` is wrapped in `while True` — if the bot crashes or disconnects, it logs the error, waits 30s, and restarts automatically. Only `KeyboardInterrupt` breaks the loop.
 - **PID lock file (`bot.pid`):** On startup, `main.py` writes its PID. Any subsequent launch checks if that PID is still alive; if yes, the new instance exits immediately. Prevents multiple instances fighting over the Telethon sqlite session file. PID file is removed on clean exit via `finally`.
 - **Launch with `python.exe` directly:** Always start the bot with the full path to `python.exe` (`C:\Users\avaid\AppData\Local\Programs\Python\Python311\python.exe`), not `py.exe`. Using `py.exe` spawns two processes (launcher + interpreter) which looks like two instances; `python.exe` gives a single process.
+- **Auto-restart on network loss:** The `while True` restart loop in `main.py` catches `ConnectionError` from Telethon and restarts after 30 s. Without this loop, a temporary network blip (e.g. `WinError 1232`) kills the process permanently — learned from a 2-day outage on 2026-05-12 where the live `main.py` was missing the loop.
+- **Auto-start on boot via startup shortcut:** `TelegramTraderBot.lnk` in the Windows startup folder re-launches the bot after any machine reboot. The shortcut must target `python.exe` (not `py.exe`) and point to `Telegram_Trader-live\`, not `Telegram_Trader-master\`.
 - **Git worktree isolation:** The live bot runs from `Telegram_Trader-live\` (locked to `master`). Development happens in `Telegram_Trader-master\` on `phase3-multi-account`. The bot's restart loop only reloads from the live folder, so dev edits never interrupt live trading.
 - **GOLD prefix for XAUUSD BIG LOTS:** The channel sometimes sends signals with `GOLD` instead of `XAUUSD` as the instrument prefix. The `_SIGNAL_RE` regex accepts both: `^(?:XAUUSD|GOLD)`.
 - **`from` keyword in XAUUSD BIG LOTS:** Channel sends `GOLD Buy from 4606/4595` — `from` appears where order type would be. Captured as order type group and normalised to `"market"` in `parse_signal`. The parsed `order_type` is stored in the journal but ignored when placing orders.
@@ -613,6 +615,22 @@ Both maps are rebuilt from the JSONL journal on startup via `JournalManager.load
 
 The live bot runs from the `Telegram_Trader-live\` worktree (locked to `master`).
 Development happens in `Telegram_Trader-master\` on `phase3-multi-account`.
+
+### Auto-start on boot
+
+A Windows startup shortcut at
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\TelegramTraderBot.lnk`
+launches the bot automatically whenever the user logs in. It runs hidden (`WindowStyle=7`).
+
+Shortcut config (set via PowerShell `WScript.Shell`):
+- **Target:** `C:\Users\avaid\AppData\Local\Programs\Python\Python311\python.exe`
+- **Arguments:** `c:\Users\avaid\Downloads\Telegram_Trader-live\main.py`
+- **WorkingDirectory:** `c:\Users\avaid\Downloads\Telegram_Trader-live`
+- **WindowStyle:** `7` (minimised/hidden)
+
+**Important:** the shortcut must use `python.exe`, not `py.exe`. `py.exe` is a launcher that spawns a second process — the PID lock will see two PIDs and may reject a valid restart.
+
+### Manual start / stop
 
 ```powershell
 # Start (single instance, hidden window, restart loop active)
