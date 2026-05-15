@@ -109,6 +109,11 @@ MOVE_SL_TO_BE_ON_TP1 = os.getenv("MOVE_SL_TO_BE_ON_TP1","true").lower()  == "tru
 # Change CIRCUIT_BREAKER_SL_LIMIT in .env to adjust without touching code.
 CIRCUIT_BREAKER_SL_LIMIT = int(os.getenv("CIRCUIT_BREAKER_SL_LIMIT", "3"))
 
+# Instruments blocked from order execution until broker symbol names are verified.
+# NAS100/US30/SPX500: live bot uses "NAS100m" but dev branch maps to "USTECm"/"US30m"/"US500m".
+# Remove from this set once the correct Exness symbol names are confirmed.
+_BLOCKED_INSTRUMENTS: frozenset[str] = frozenset({"NAS100", "US30", "SPX500"})
+
 # ── Account configuration ──────────────────────────────────────────────────────
 # To add an account: copy an entry, change name/login/password/server/asset_classes.
 # To disable an account without removing it: set its login to 0 — place_order
@@ -464,6 +469,13 @@ def _place_order_sync(signal: dict) -> None:
     channel_id  = signal["source_channel_id"]
     symbol      = SYMBOL_MAP.get(instrument, instrument)
 
+    if instrument in _BLOCKED_INSTRUMENTS:
+        log.warning(
+            f"place_order skipped — {instrument} is in _BLOCKED_INSTRUMENTS"
+            f" (broker symbol name unverified) signal_id={signal_id}"
+        )
+        return
+
     if not tps or sl is None:
         log.warning(
             f"place_order skipped — signal must have both SL and at least one TP"
@@ -546,6 +558,8 @@ def _place_order_sync(signal: dict) -> None:
                     "type_time":    mt5.ORDER_TIME_GTC,
                     "type_filling": filling,
                 }
+                if action == mt5.TRADE_ACTION_DEAL:
+                    request["deviation"] = 20
                 log.info(
                     f"[{account['name']}] Sending TP{i}/{len(orders_tps)}: "
                     f"{instrument} {signal['direction']} @ {price} SL={sl} TP={tp} lot={lot}"
@@ -623,6 +637,7 @@ def _handle_tp_hit_sync(signal_id: str) -> None:
                     pos    = positions[0]
                     result = mt5.order_send({
                         "action":   mt5.TRADE_ACTION_SLTP,
+                        "symbol":   pos.symbol,
                         "position": pos.ticket,
                         "sl":       pos.price_open,
                         "tp":       pos.tp,
@@ -706,6 +721,7 @@ def _handle_close_sync(signal_id: str, update_type: str = "full_close") -> None:
                         "type":         close_type,
                         "position":     pos.ticket,
                         "price":        price,
+                        "deviation":    20,
                         "type_time":    mt5.ORDER_TIME_GTC,
                         "type_filling": mt5.ORDER_FILLING_IOC,
                     }

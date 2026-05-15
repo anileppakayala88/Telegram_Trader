@@ -660,6 +660,7 @@ Remove-Item "c:\Users\avaid\Downloads\Telegram_Trader-live\bot.pid"
 ## TODO (deferred)
 
 - [ ] **Phase 4 go-live:** plug in real forex MT5 credentials (`MT5_FOREX_1/2_*`) and index credentials (`MT5_INDEX_1/2_*`) in live `.env` — commodity account already active
+- [ ] **NAS100 (and US30 / SPX500) orders blocked** — Exness symbol name unverified: live bot uses `"NAS100m"`, dev branch uses `"USTECm"`. Orders to NAS100 are skipped at runtime (`_BLOCKED_INSTRUMENTS` set in `webhook.py`) until the correct broker symbol is confirmed. US30/SPX500 are also index instruments and may have the same naming issue — block them too until verified.
 - [ ] Auto partial-close when channel sends "close partials" (Phase 2.1 remainder)
 - [ ] Online journal hosting (Google Sheets) — after trading is stable
 - [ ] Kathy ZIP Swing Trades (channel 2186423407) — separate channel, not yet onboarded
