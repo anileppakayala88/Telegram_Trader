@@ -41,7 +41,9 @@ def register_handlers(client, journal):
 
         msg = event.message
         try:
-            msg_type = parser.classify(msg)
+            # classify() and parse_update() may call the LLM (sync HTTP).
+            # Run them in a thread so the Telethon event loop is never blocked.
+            msg_type = await asyncio.to_thread(parser.classify, msg)
             log.info(f"[{parser.CHANNEL_NAME}] classify={msg_type} msg_id={msg.id} text={repr((msg.text or '')[:80])}")
 
             if msg_type == "noise":
@@ -67,7 +69,7 @@ def register_handlers(client, journal):
 
             elif msg_type == "trade_update":
                 signal_id = journal.resolve_signal_id(channel_id, msg.reply_to_msg_id)
-                result    = parser.parse_update(msg, signal_id)
+                result    = await asyncio.to_thread(parser.parse_update, msg, signal_id)
                 if not result:
                     return
                 # Parsers may return a single dict or a list (e.g. Kathy ZIP multi-close)
