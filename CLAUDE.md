@@ -347,35 +347,12 @@ TELEGRAM_PHONE=
 # LLM fallback (optional — falls back to "commentary" if not set)
 ANTHROPIC_API_KEY=
 
-# MT5 — Commodity accounts (XAUUSD, XAGUSD)
-MT5_COMMODITY_1_LOGIN=
-MT5_COMMODITY_1_PASSWORD=
-MT5_COMMODITY_1_SERVER=
-MT5_COMMODITY_2_LOGIN=
-MT5_COMMODITY_2_PASSWORD=
-MT5_COMMODITY_2_SERVER=
-MT5_COMMODITY_RISK_PCT=1.0    # % of equity per trade (used when RISK_USD not set)
-MT5_COMMODITY_RISK_USD=       # fixed $ per trade (overrides RISK_PCT if set)
-
-# MT5 — Forex accounts
-MT5_FOREX_1_LOGIN=
-MT5_FOREX_1_PASSWORD=
-MT5_FOREX_1_SERVER=
-MT5_FOREX_2_LOGIN=
-MT5_FOREX_2_PASSWORD=
-MT5_FOREX_2_SERVER=
-MT5_FOREX_RISK_PCT=1.0
-MT5_FOREX_RISK_USD=
-
-# MT5 — Index accounts (NAS100, US30, SPX500)
-MT5_INDEX_1_LOGIN=
-MT5_INDEX_1_PASSWORD=
-MT5_INDEX_1_SERVER=
-MT5_INDEX_2_LOGIN=
-MT5_INDEX_2_PASSWORD=
-MT5_INDEX_2_SERVER=
-MT5_INDEX_RISK_PCT=1.0
-MT5_INDEX_RISK_USD=
+# MT5 — single account (all asset classes: commodity, forex, index, crypto)
+MT5_LOGIN=
+MT5_PASSWORD=
+MT5_SERVER=
+MT5_RISK_PCT=1.0              # % of equity per trade (used when RISK_USD not set)
+MT5_RISK_USD=                 # fixed $ per trade (overrides RISK_PCT if set)
 
 # Order behaviour
 DRY_RUN=true                  # set to false to place real orders
@@ -492,18 +469,15 @@ Pending limit/stop orders are cancelled automatically when any of these update t
 
 ---
 
-## Multi-Account Routing
+## Account Routing
 
-### Account groups
+### Current setup — single account, all asset classes
 
-| Group name  | Asset classes | Env var prefix      | Accounts |
-|-------------|---------------|---------------------|----------|
-| commodity   | commodity     | MT5_COMMODITY_1/2_* | 2        |
-| forex       | forex         | MT5_FOREX_1/2_*     | 2        |
-| index       | index         | MT5_INDEX_1/2_*     | 2        |
-| crypto      | (not yet)     | MT5_CRYPTO_1/2_*    | commented out in ACCOUNTS |
+One `"main"` account entry in `ACCOUNTS` (`webhook.py`) handles all asset classes
+(commodity, forex, index, crypto). Credentials read from `MT5_LOGIN / MT5_PASSWORD / MT5_SERVER`.
 
-To add a new account group: add entries to the `ACCOUNTS` list in `webhook.py`, set env vars.
+To expand to per-class accounts later: add entries to `ACCOUNTS`, assign the relevant
+`asset_classes` list to each, and set per-account env vars.
 
 ### Circuit breaker
 
@@ -659,7 +633,7 @@ Remove-Item "c:\Users\avaid\Downloads\Telegram_Trader-live\bot.pid"
 
 ## TODO (deferred)
 
-- [ ] **Phase 4 go-live:** plug in real forex MT5 credentials (`MT5_FOREX_1/2_*`) and index credentials (`MT5_INDEX_1/2_*`) in live `.env` — commodity account already active
+- [ ] **Phase 4 go-live:** merge `phase3-multi-account` → `master`, copy to live folder, restart bot. Live `.env` already has `MT5_LOGIN/PASSWORD/SERVER`; add `MT5_RISK_PCT` (default 1.0). No other credential changes needed — single account covers all asset classes.
 - [ ] **NAS100 (and US30 / SPX500) orders blocked** — Exness symbol name unverified: live bot uses `"NAS100m"`, dev branch uses `"USTECm"`. Orders to NAS100 are skipped at runtime (`_BLOCKED_INSTRUMENTS` set in `webhook.py`) until the correct broker symbol is confirmed. US30/SPX500 are also index instruments and may have the same naming issue — block them too until verified.
 - [ ] Auto partial-close when channel sends "close partials" (Phase 2.1 remainder)
 - [ ] Online journal hosting (Google Sheets) — after trading is stable

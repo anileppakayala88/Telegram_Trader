@@ -1,30 +1,18 @@
 """
-webhook.py — MT5 order execution (multi-account)
+webhook.py — MT5 order execution (single account, all asset classes)
 
-Routes signals to MT5 accounts by asset class. Each asset class has two
-accounts; both receive the same trade. Orders are placed sequentially —
-connect → trade → shutdown → next account — because the MT5 Python library
-supports one terminal connection at a time.
+Routes all signals — commodity, forex, and index — to a single MT5 account.
+The account is identified by the existing MT5_LOGIN / MT5_PASSWORD / MT5_SERVER
+env vars already used by the live bot. No additional credentials needed.
 
-Account config lives in the ACCOUNTS list below. Credentials are loaded from
-.env (dummy defaults are in place until real creds are provided). Circuit-
-breaker state is persisted to journal/account_state.json.
+Required .env vars:
+    MT5_LOGIN=
+    MT5_PASSWORD=
+    MT5_SERVER=
 
-Required .env vars per account group (see ACCOUNTS):
-    MT5_COMMODITY_1_LOGIN / _PASSWORD / _SERVER
-    MT5_COMMODITY_2_LOGIN / _PASSWORD / _SERVER
-    MT5_FOREX_1_LOGIN     / _PASSWORD / _SERVER
-    MT5_FOREX_2_LOGIN     / _PASSWORD / _SERVER
-    MT5_INDEX_1_LOGIN     / _PASSWORD / _SERVER
-    MT5_INDEX_2_LOGIN     / _PASSWORD / _SERVER
-
-Risk per account group (shared between the two accounts in each group):
-    MT5_COMMODITY_RISK_PCT=1.0   (% of equity; ignored when RISK_USD is set)
-    MT5_COMMODITY_RISK_USD=      (fixed $ per trade; overrides RISK_PCT if set)
-    MT5_FOREX_RISK_PCT=1.0
-    MT5_FOREX_RISK_USD=
-    MT5_INDEX_RISK_PCT=1.0
-    MT5_INDEX_RISK_USD=
+Risk (choose one):
+    MT5_RISK_PCT=1.0     (% of equity per trade — default)
+    MT5_RISK_USD=        (fixed $ per trade; overrides RISK_PCT if set)
 
 Other flags:
     DRY_RUN=true
@@ -115,15 +103,6 @@ CIRCUIT_BREAKER_SL_LIMIT = int(os.getenv("CIRCUIT_BREAKER_SL_LIMIT", "3"))
 _BLOCKED_INSTRUMENTS: frozenset[str] = frozenset({"NAS100", "US30", "SPX500"})
 
 # ── Account configuration ──────────────────────────────────────────────────────
-# To add an account: copy an entry, change name/login/password/server/asset_classes.
-# To disable an account without removing it: set its login to 0 — place_order
-# will skip it (no valid MT5 account number).
-#
-# risk_pct  : risk per trade as % of current equity
-# risk_usd  : fixed risk per trade in account currency (overrides risk_pct when set)
-#
-# The runtime state fields (halted / consecutive_sl / last_reset_date) are
-# initialised here and then overwritten by _load_account_state() on startup.
 
 def _opt_float(val: str | None) -> float | None:
     try:
@@ -133,80 +112,18 @@ def _opt_float(val: str | None) -> float | None:
 
 
 ACCOUNTS: list[dict] = [
-    # ── Commodity (XAUUSD, XAGUSD) ────────────────────────────────────────────
+    # Single account covers all asset classes.
+    # To expand to per-class accounts later, add entries and split asset_classes.
     {
-        "name":           "commodity_1",
-        "login":          int(os.getenv("MT5_COMMODITY_1_LOGIN",    "10000001")),
-        "password":       os.getenv("MT5_COMMODITY_1_PASSWORD",     "dummy"),
-        "server":         os.getenv("MT5_COMMODITY_1_SERVER",       "Exness-MT5Trial"),
-        "asset_classes":  ["commodity"],
-        "risk_pct":       float(os.getenv("MT5_COMMODITY_RISK_PCT", "1.0")),
-        "risk_usd":       _opt_float(os.getenv("MT5_COMMODITY_RISK_USD")),
+        "name":          "main",
+        "login":         int(os.getenv("MT5_LOGIN",    "0")),
+        "password":      os.getenv("MT5_PASSWORD",     "dummy"),
+        "server":        os.getenv("MT5_SERVER",       "Exness-MT5Trial"),
+        "asset_classes": ["commodity", "forex", "index", "crypto"],
+        "risk_pct":      float(os.getenv("MT5_RISK_PCT", "1.0")),
+        "risk_usd":      _opt_float(os.getenv("MT5_RISK_USD")),
         "halted": False, "consecutive_sl": 0, "last_reset_date": None,
     },
-    {
-        "name":           "commodity_2",
-        "login":          int(os.getenv("MT5_COMMODITY_2_LOGIN",    "10000002")),
-        "password":       os.getenv("MT5_COMMODITY_2_PASSWORD",     "dummy"),
-        "server":         os.getenv("MT5_COMMODITY_2_SERVER",       "Exness-MT5Trial"),
-        "asset_classes":  ["commodity"],
-        "risk_pct":       float(os.getenv("MT5_COMMODITY_RISK_PCT", "1.0")),
-        "risk_usd":       _opt_float(os.getenv("MT5_COMMODITY_RISK_USD")),
-        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
-    },
-    # ── Forex ─────────────────────────────────────────────────────────────────
-    {
-        "name":           "forex_1",
-        "login":          int(os.getenv("MT5_FOREX_1_LOGIN",        "10000003")),
-        "password":       os.getenv("MT5_FOREX_1_PASSWORD",         "dummy"),
-        "server":         os.getenv("MT5_FOREX_1_SERVER",           "Exness-MT5Trial"),
-        "asset_classes":  ["forex"],
-        "risk_pct":       float(os.getenv("MT5_FOREX_RISK_PCT",     "1.0")),
-        "risk_usd":       _opt_float(os.getenv("MT5_FOREX_RISK_USD")),
-        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
-    },
-    {
-        "name":           "forex_2",
-        "login":          int(os.getenv("MT5_FOREX_2_LOGIN",        "10000004")),
-        "password":       os.getenv("MT5_FOREX_2_PASSWORD",         "dummy"),
-        "server":         os.getenv("MT5_FOREX_2_SERVER",           "Exness-MT5Trial"),
-        "asset_classes":  ["forex"],
-        "risk_pct":       float(os.getenv("MT5_FOREX_RISK_PCT",     "1.0")),
-        "risk_usd":       _opt_float(os.getenv("MT5_FOREX_RISK_USD")),
-        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
-    },
-    # ── Index (NAS100, US30, SPX500) ──────────────────────────────────────────
-    {
-        "name":           "index_1",
-        "login":          int(os.getenv("MT5_INDEX_1_LOGIN",        "10000005")),
-        "password":       os.getenv("MT5_INDEX_1_PASSWORD",         "dummy"),
-        "server":         os.getenv("MT5_INDEX_1_SERVER",           "Exness-MT5Trial"),
-        "asset_classes":  ["index"],
-        "risk_pct":       float(os.getenv("MT5_INDEX_RISK_PCT",     "1.0")),
-        "risk_usd":       _opt_float(os.getenv("MT5_INDEX_RISK_USD")),
-        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
-    },
-    {
-        "name":           "index_2",
-        "login":          int(os.getenv("MT5_INDEX_2_LOGIN",        "10000006")),
-        "password":       os.getenv("MT5_INDEX_2_PASSWORD",         "dummy"),
-        "server":         os.getenv("MT5_INDEX_2_SERVER",           "Exness-MT5Trial"),
-        "asset_classes":  ["index"],
-        "risk_pct":       float(os.getenv("MT5_INDEX_RISK_PCT",     "1.0")),
-        "risk_usd":       _opt_float(os.getenv("MT5_INDEX_RISK_USD")),
-        "halted": False, "consecutive_sl": 0, "last_reset_date": None,
-    },
-    # ── Crypto (BTCUSD, ETHUSD) — add accounts here when ready ───────────────
-    # {
-    #     "name":          "crypto_1",
-    #     "login":         int(os.getenv("MT5_CRYPTO_1_LOGIN",    "10000007")),
-    #     "password":      os.getenv("MT5_CRYPTO_1_PASSWORD",     "dummy"),
-    #     "server":        os.getenv("MT5_CRYPTO_1_SERVER",       "Exness-MT5Trial"),
-    #     "asset_classes": ["crypto"],
-    #     "risk_pct":      float(os.getenv("MT5_CRYPTO_RISK_PCT", "1.0")),
-    #     "risk_usd":      _opt_float(os.getenv("MT5_CRYPTO_RISK_USD")),
-    #     "halted": False, "consecutive_sl": 0, "last_reset_date": None,
-    # },
 ]
 
 
