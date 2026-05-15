@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -36,6 +37,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 log = logging.getLogger(__name__)
+
+# Serialises all MT5 connect→work→shutdown blocks across threads.
+# The MT5 Python library supports one connection at a time; concurrent
+# place_order / handle_close / handle_tp_hit calls must queue, not race.
+_mt5_lock = threading.Lock()
 
 # ── Market / tolerance config (unchanged from single-account version) ──────────
 
@@ -438,73 +444,74 @@ def _place_order_sync(signal: dict) -> None:
             )
             continue
 
-        if not _connect(account):
-            mt5.shutdown()
-            continue
+        with _mt5_lock:
+            if not _connect(account):
+                mt5.shutdown()
+                continue
 
-        try:
-            if channel_id == 2133117224:      # Vip Thrilokh — single entry
-                spec       = _resolve_thrilokh(signal)
-                orders_tps = [(spec, tp) for tp in tp_levels]
-            elif channel_id == 1481325093:    # XAUUSD VIP BIG LOTS — range aware
-                specs = _resolve_xauusd(signal)
-                orders_tps = (
-                    list(zip(specs, tp_levels)) if len(specs) > 1
-                    else [(specs[0], tp) for tp in tp_levels]
-                )
-            else:                             # Kathy ZIP and any future channels
-                spec       = _resolve_thrilokh(signal)
-                orders_tps = [(spec, tp) for tp in tp_levels]
-
-            tickets = []
-            for i, ((action, mt5_type, price), tp) in enumerate(orders_tps, 1):
-                lot     = _calc_lot(account, symbol, instrument, price, sl)
-                filling = (
-                    mt5.ORDER_FILLING_IOC
-                    if action == mt5.TRADE_ACTION_DEAL
-                    else mt5.ORDER_FILLING_RETURN
-                )
-                request: dict = {
-                    "action":       action,
-                    "symbol":       symbol,
-                    "volume":       lot,
-                    "type":         mt5_type,
-                    "price":        price,
-                    "sl":           sl,
-                    "tp":           tp,
-                    "type_time":    mt5.ORDER_TIME_GTC,
-                    "type_filling": filling,
-                }
-                if action == mt5.TRADE_ACTION_DEAL:
-                    request["deviation"] = 20
-                log.info(
-                    f"[{account['name']}] Sending TP{i}/{len(orders_tps)}: "
-                    f"{instrument} {signal['direction']} @ {price} SL={sl} TP={tp} lot={lot}"
-                )
-                result = mt5.order_send(request)
-
-                if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                    retcode = result.retcode if result else None
-                    err     = result.comment if result else mt5.last_error()
-                    log.error(
-                        f"[{account['name']}] order_send TP{i} failed"
-                        f" retcode={retcode} err={err}: {instrument} {signal['direction']}"
+            try:
+                if channel_id == 2133117224:      # Vip Thrilokh — single entry
+                    spec       = _resolve_thrilokh(signal)
+                    orders_tps = [(spec, tp) for tp in tp_levels]
+                elif channel_id == 1481325093:    # XAUUSD VIP BIG LOTS — range aware
+                    specs = _resolve_xauusd(signal)
+                    orders_tps = (
+                        list(zip(specs, tp_levels)) if len(specs) > 1
+                        else [(specs[0], tp) for tp in tp_levels]
                     )
-                    continue
+                else:                             # Kathy ZIP and any future channels
+                    spec       = _resolve_thrilokh(signal)
+                    orders_tps = [(spec, tp) for tp in tp_levels]
 
-                tickets.append(result.order)
-                log.info(
-                    f"[{account['name']}] TP{i} placed: ticket={result.order}"
-                    f" {instrument} @ {price} TP={tp} lot={lot}"
-                )
+                tickets = []
+                for i, ((action, mt5_type, price), tp) in enumerate(orders_tps, 1):
+                    lot     = _calc_lot(account, symbol, instrument, price, sl)
+                    filling = (
+                        mt5.ORDER_FILLING_IOC
+                        if action == mt5.TRADE_ACTION_DEAL
+                        else mt5.ORDER_FILLING_RETURN
+                    )
+                    request: dict = {
+                        "action":       action,
+                        "symbol":       symbol,
+                        "volume":       lot,
+                        "type":         mt5_type,
+                        "price":        price,
+                        "sl":           sl,
+                        "tp":           tp,
+                        "type_time":    mt5.ORDER_TIME_GTC,
+                        "type_filling": filling,
+                    }
+                    if action == mt5.TRADE_ACTION_DEAL:
+                        request["deviation"] = 20
+                    log.info(
+                        f"[{account['name']}] Sending TP{i}/{len(orders_tps)}: "
+                        f"{instrument} {signal['direction']} @ {price} SL={sl} TP={tp} lot={lot}"
+                    )
+                    result = mt5.order_send(request)
 
-            if tickets:
-                signal_tickets[account["name"]] = tickets
+                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                        retcode = result.retcode if result else None
+                        err     = result.comment if result else mt5.last_error()
+                        log.error(
+                            f"[{account['name']}] order_send TP{i} failed"
+                            f" retcode={retcode} err={err}: {instrument} {signal['direction']}"
+                        )
+                        continue
 
-        except Exception:
-            log.exception(f"[{account['name']}] place_order failed — signal_id={signal_id}")
-        finally:
-            mt5.shutdown()
+                    tickets.append(result.order)
+                    log.info(
+                        f"[{account['name']}] TP{i} placed: ticket={result.order}"
+                        f" {instrument} @ {price} TP={tp} lot={lot}"
+                    )
+
+                if tickets:
+                    signal_tickets[account["name"]] = tickets
+
+            except Exception:
+                log.exception(f"[{account['name']}] place_order failed — signal_id={signal_id}")
+            finally:
+                mt5.shutdown()
 
     if signal_tickets:
         _open[signal_id] = signal_tickets
@@ -542,50 +549,51 @@ def _handle_tp_hit_sync(signal_id: str) -> None:
         if not account:
             continue
 
-        if not _connect(account):
-            mt5.shutdown()
-            continue
+        with _mt5_lock:
+            if not _connect(account):
+                mt5.shutdown()
+                continue
 
-        try:
-            remaining = []
-            for ticket in list(tickets):
-                positions = mt5.positions_get(ticket=ticket)
-                if positions:
-                    pos    = positions[0]
-                    result = mt5.order_send({
-                        "action":   mt5.TRADE_ACTION_SLTP,
-                        "symbol":   pos.symbol,
-                        "position": pos.ticket,
-                        "sl":       pos.price_open,
-                        "tp":       pos.tp,
-                    })
-                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                        err = result.comment if result else mt5.last_error()
-                        log.error(f"[{acc_name}] Move SL to BE failed ({err}): ticket={ticket}")
-                    else:
-                        log.info(
-                            f"[{acc_name}] SL moved to BE ({pos.price_open}):"
-                            f" ticket={ticket} signal_id={signal_id}"
-                        )
-                    remaining.append(ticket)
-                else:
-                    orders = mt5.orders_get(ticket=ticket)
-                    if orders:
-                        result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+            try:
+                remaining = []
+                for ticket in list(tickets):
+                    positions = mt5.positions_get(ticket=ticket)
+                    if positions:
+                        pos    = positions[0]
+                        result = mt5.order_send({
+                            "action":   mt5.TRADE_ACTION_SLTP,
+                            "symbol":   pos.symbol,
+                            "position": pos.ticket,
+                            "sl":       pos.price_open,
+                            "tp":       pos.tp,
+                        })
                         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                             err = result.comment if result else mt5.last_error()
-                            log.error(f"[{acc_name}] Cancel pending on tp_hit failed ({err}): ticket={ticket}")
+                            log.error(f"[{acc_name}] Move SL to BE failed ({err}): ticket={ticket}")
                         else:
-                            log.info(f"[{acc_name}] Pending cancelled on tp_hit: ticket={ticket} signal_id={signal_id}")
+                            log.info(
+                                f"[{acc_name}] SL moved to BE ({pos.price_open}):"
+                                f" ticket={ticket} signal_id={signal_id}"
+                            )
+                        remaining.append(ticket)
                     else:
-                        log.info(f"[{acc_name}] Ticket {ticket} already closed by MT5: signal_id={signal_id}")
+                        orders = mt5.orders_get(ticket=ticket)
+                        if orders:
+                            result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+                            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                                err = result.comment if result else mt5.last_error()
+                                log.error(f"[{acc_name}] Cancel pending on tp_hit failed ({err}): ticket={ticket}")
+                            else:
+                                log.info(f"[{acc_name}] Pending cancelled on tp_hit: ticket={ticket} signal_id={signal_id}")
+                        else:
+                            log.info(f"[{acc_name}] Ticket {ticket} already closed by MT5: signal_id={signal_id}")
 
-            acc_tickets[acc_name] = remaining
+                acc_tickets[acc_name] = remaining
 
-        except Exception:
-            log.exception(f"[{acc_name}] handle_tp_hit failed — signal_id={signal_id}")
-        finally:
-            mt5.shutdown()
+            except Exception:
+                log.exception(f"[{acc_name}] handle_tp_hit failed — signal_id={signal_id}")
+            finally:
+                mt5.shutdown()
 
         # TP hit = win → reset the SL streak for this account
         account["consecutive_sl"] = 0
@@ -619,51 +627,52 @@ def _handle_close_sync(signal_id: str, update_type: str = "full_close") -> None:
         if not account:
             continue
 
-        if not _connect(account):
-            mt5.shutdown()
-            continue
+        with _mt5_lock:
+            if not _connect(account):
+                mt5.shutdown()
+                continue
 
-        try:
-            for ticket in list(tickets):
-                positions = mt5.positions_get(ticket=ticket)
-                if positions:
-                    pos        = positions[0]
-                    close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                    tick       = mt5.symbol_info_tick(pos.symbol)
-                    price      = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
-                    request    = {
-                        "action":       mt5.TRADE_ACTION_DEAL,
-                        "symbol":       pos.symbol,
-                        "volume":       pos.volume,
-                        "type":         close_type,
-                        "position":     pos.ticket,
-                        "price":        price,
-                        "deviation":    20,
-                        "type_time":    mt5.ORDER_TIME_GTC,
-                        "type_filling": mt5.ORDER_FILLING_IOC,
-                    }
-                    result = mt5.order_send(request)
-                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                        err = result.comment if result else mt5.last_error()
-                        log.error(f"[{acc_name}] Close failed ({err}): ticket={ticket}")
-                    else:
-                        log.info(f"[{acc_name}] Position closed: ticket={ticket} signal_id={signal_id}")
-                else:
-                    orders = mt5.orders_get(ticket=ticket)
-                    if orders:
-                        result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+            try:
+                for ticket in list(tickets):
+                    positions = mt5.positions_get(ticket=ticket)
+                    if positions:
+                        pos        = positions[0]
+                        close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                        tick       = mt5.symbol_info_tick(pos.symbol)
+                        price      = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+                        request    = {
+                            "action":       mt5.TRADE_ACTION_DEAL,
+                            "symbol":       pos.symbol,
+                            "volume":       pos.volume,
+                            "type":         close_type,
+                            "position":     pos.ticket,
+                            "price":        price,
+                            "deviation":    20,
+                            "type_time":    mt5.ORDER_TIME_GTC,
+                            "type_filling": mt5.ORDER_FILLING_IOC,
+                        }
+                        result = mt5.order_send(request)
                         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                             err = result.comment if result else mt5.last_error()
-                            log.error(f"[{acc_name}] Cancel failed ({err}): ticket={ticket}")
+                            log.error(f"[{acc_name}] Close failed ({err}): ticket={ticket}")
                         else:
-                            log.info(f"[{acc_name}] Pending cancelled: ticket={ticket} signal_id={signal_id}")
+                            log.info(f"[{acc_name}] Position closed: ticket={ticket} signal_id={signal_id}")
                     else:
-                        log.warning(f"[{acc_name}] Ticket {ticket} not found — already closed/cancelled?")
+                        orders = mt5.orders_get(ticket=ticket)
+                        if orders:
+                            result = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": ticket})
+                            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                                err = result.comment if result else mt5.last_error()
+                                log.error(f"[{acc_name}] Cancel failed ({err}): ticket={ticket}")
+                            else:
+                                log.info(f"[{acc_name}] Pending cancelled: ticket={ticket} signal_id={signal_id}")
+                        else:
+                            log.warning(f"[{acc_name}] Ticket {ticket} not found — already closed/cancelled?")
 
-        except Exception:
-            log.exception(f"[{acc_name}] handle_close failed — signal_id={signal_id}")
-        finally:
-            mt5.shutdown()
+            except Exception:
+                log.exception(f"[{acc_name}] handle_close failed — signal_id={signal_id}")
+            finally:
+                mt5.shutdown()
 
         # Circuit breaker: SL hit increments streak; anything else (full_close, cancelled) does not
         if update_type == "sl_hit":
