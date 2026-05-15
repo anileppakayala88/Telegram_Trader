@@ -341,6 +341,9 @@ def _place_order_sync(signal: dict) -> None:
                 "type_time":    mt5.ORDER_TIME_GTC,
                 "type_filling": filling,
             }
+            if action == mt5.TRADE_ACTION_DEAL:
+                request["deviation"] = 20
+
             log.info(f"Sending TP{i}/{len(orders_tps)} order: {instrument} {signal['direction']} @ {price} SL={sl} TP={tp}")
             result = mt5.order_send(request)
 
@@ -360,6 +363,8 @@ def _place_order_sync(signal: dict) -> None:
 
     except Exception:
         log.exception(f"place_order failed — signal_id={signal_id}")
+    finally:
+        mt5.shutdown()
 
 
 # ── TP1 hit — move remaining positions to breakeven ───────────────────────────
@@ -465,6 +470,7 @@ def _handle_close_sync(signal_id: str) -> None:
                     "type":         close_type,
                     "position":     pos.ticket,
                     "price":        price,
+                    "deviation":    20,
                     "type_time":    mt5.ORDER_TIME_GTC,
                     "type_filling": mt5.ORDER_FILLING_IOC,
                 }
@@ -491,5 +497,6 @@ def _handle_close_sync(signal_id: str) -> None:
     except Exception:
         log.exception(f"handle_close failed — signal_id={signal_id}")
     finally:
+        mt5.shutdown()
         _open.pop(signal_id, None)
         _save()
