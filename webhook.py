@@ -323,8 +323,9 @@ def _place_order_sync(signal: dict) -> None:
                 # Split range — each entry price paired with its own TP level
                 orders_tps = list(zip(specs, tp_levels))
         else:
-            log.warning(f"place_order: no order logic for channel {channel_id}")
-            return
+            # Any other source (e.g. TradingView) — single entry, one order per TP
+            spec = _resolve_thrilokh(signal)
+            orders_tps = [(spec, tp) for tp in tp_levels]
 
         tickets = []
         for i, ((action, mt5_type, price), tp) in enumerate(orders_tps, 1):

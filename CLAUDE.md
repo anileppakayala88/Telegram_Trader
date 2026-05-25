@@ -42,19 +42,30 @@ Reads trade signal messages from a Telegram channel/group, parses them into stru
 - Cache-backed: normalized message → result stored in `cache/classify_cache.json`
 - Falls back to `"commentary"` when ANTHROPIC_API_KEY is not set
 
+### Phase 4 — TradingView → MT5 via Telegram (complete)
+- TradingView alerts fire to trade-log (Vercel), which posts a structured JSON message to a private Telegram channel (xauusd_bot)
+- The bot reads that channel via Telethon — same listener loop, no new infrastructure
+- `channels/tv_signals.py` parses the JSON messages and routes to MT5 exactly like any other channel
+- No ngrok, no HTTP server — Telegram is the message bus
+
 ---
 
 ## Architecture
 
 ```
-Telegram (multiple channels)
+TradingView alert
+      |
+trade-log (Vercel) — logs to GitHub, posts JSON to Telegram channel (xauusd_bot)
+      |
+      ↓
+Telegram (multiple channels, including xauusd_bot for TV signals)
         |
    Telethon Listener
         |
    Channel Router (identifies source channel)
         |
    Channel-Specific Parser
-   (per-channel profile — regex fast path + LLM fallback)
+   (per-channel profile — regex fast path + LLM fallback; TV channel uses JSON)
         |
    Message Classifier
    (new signal | trade update | noise)
@@ -121,11 +132,14 @@ Telegram_Trader/
 ├── channels/
 │   ├── __init__.py           # channel registry: maps channel ID → parser module
 │   ├── vip_thrilokh.py       # parser for Channel 1 (Vip Thrilokh)
-│   └── xauusd_big_lots.py    # parser for Channel 2 (XAUUSD VIP BIG LOTS)
+│   ├── xauusd_big_lots.py    # parser for Channel 2 (XAUUSD VIP BIG LOTS)
+│   └── tv_signals.py         # parser for Channel 3 (TradingView via xauusd_bot Telegram channel)
 └── journal/                  # created at runtime
     ├── vip_thrilokh.jsonl    # append-only signal log for channel 1
     ├── xauusd_big_lots.jsonl # append-only signal log for channel 2
-    └── positions.json        # persisted MT5 position/order IDs (Phase 2)
+    ├── tv_signals.jsonl      # append-only signal log for TradingView signals
+    ├── positions.json        # persisted MT5 position/order IDs (Phase 2)
+    └── tv_positions.json     # persisted TradingView open positions (ticker → signal_id)
 ```
 
 ### Adding a New Channel
@@ -150,6 +164,7 @@ Telegram_Trader/
 | Vip Thrilokh         | 2133117224   | no-username  | Multi-asset (BTC, Forex, NQ)       |
 | XAUUSD VIP BIG LOTS  | 1481325093   | no-username  | XAUUSD only                        |
 | Test_TV_3min         | 2540865305   | no-username  | Dev/test — uses Vip Thrilokh parser |
+| xauusd_bot           | 3720726531   | no-username  | TradingView signals (all instruments) |
 
 Access channels by **numeric ID** (no username available for any).
 
@@ -252,6 +267,45 @@ TP 4615
 
 ---
 
+### Channel 3 — TradingView Signals via xauusd_bot (ID: 3720726531)
+
+**Source:** Private Telegram channel (`xauusd_bot`) that trade-log (Vercel) posts to when a TradingView alert fires.
+**Bot token:** Telegram bot `8955279019:...` posts messages; Telethon user account reads them.
+**Parser:** `channels/tv_signals.py` — JSON format, no regex needed.
+
+**Entry message format (Vercel → Telegram):**
+```json
+{"tv":"entry","id":"MNQ1!-1748000000","ticker":"MNQ1!","action":"buy","price":19500,"sl":19450,"tp1":19600,"tp2":19700}
+```
+
+**Exit message format:**
+```json
+{"tv":"exit","id":"MNQ1!-1748000000","ticker":"MNQ1!","action":"exit","tp":"TP1","price":19600}
+{"tv":"exit","id":"MNQ1!-1748000000","ticker":"MNQ1!","action":"sl","price":19450}
+```
+
+**Signal linking:** `vercel_id` (the `id` field) links exits to their entry. Parser stores `vercel_id → signal_id` in `journal/tv_positions.json` and looks it up on exit. This survives bot restarts.
+
+**Ticker mapping (TradingView → MT5 instrument):**
+| TradingView | MT5 instrument |
+|---|---|
+| MNQ1!, NQ1! | NAS100 |
+| MES1!, ES1! | SPX500 |
+| MYM1!, YM1! | US30 |
+| MGC1!, GC1! | XAUUSD |
+| XAUUSD, EURUSD, GBPUSD, etc. | pass-through |
+
+**Update types:**
+- `action=exit, tp=TP1` → `tp_hit` (move SL to breakeven on remaining positions)
+- `action=exit` (no TP1 label) → `full_close`
+- `action=sl` → `sl_hit`
+
+**Vercel env vars required (trade-log project):**
+- `TELEGRAM_BOT_TOKEN` — bot token that posts to xauusd_bot channel
+- `TELEGRAM_CHANNEL_ID` — `-1003720726531`
+
+---
+
 ## Signal Schema
 
 ```json
@@ -292,6 +346,12 @@ DRY_RUN=true                  # set to false to place real orders
 USE_TP3=false                 # set to true to also place a third order targeting TP3
 SPLIT_RANGE_ENTRIES=true      # place one order per entry price in a range (XAUUSD BIG LOTS)
 MOVE_SL_TO_BE_ON_TP1=true     # move remaining positions to breakeven when TP1 is hit
+```
+
+**Vercel env vars (trade-log project — set in Vercel dashboard):**
+```
+TELEGRAM_BOT_TOKEN=<bot token that posts to xauusd_bot channel>
+TELEGRAM_CHANNEL_ID=-1003720726531
 ```
 
 ---

@@ -10,6 +10,7 @@ CHANNEL_NAMES = {
     2133117224: "vip_thrilokh",
     1481325093: "xauusd_big_lots",
     2540865305: "test_tv_3min",
+    3720726531: "tv_signals",
 }
 
 

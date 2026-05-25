@@ -1,4 +1,4 @@
-from channels import vip_thrilokh, xauusd_big_lots
+from channels import vip_thrilokh, xauusd_big_lots, tv_signals
 
 # Maps Telegram channel ID → parser module
 # Each parser module must implement:
@@ -10,4 +10,5 @@ from channels import vip_thrilokh, xauusd_big_lots
 CHANNEL_PARSERS = {
     2133117224: vip_thrilokh,
     1481325093: xauusd_big_lots,
+    3720726531: tv_signals,
 }

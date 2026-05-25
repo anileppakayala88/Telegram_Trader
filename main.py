@@ -9,6 +9,7 @@ from journal import JournalManager
 from listener import register_handlers
 from channels import CHANNEL_PARSERS
 import webhook
+from channels import tv_signals
 
 load_dotenv()
 
@@ -57,6 +58,7 @@ async def main():
     journal = JournalManager()
     journal.load_state()
     webhook.load_state()
+    tv_signals.load_state()
 
     client = TelegramClient("session_fetch", api_id, api_hash)
     await client.connect()

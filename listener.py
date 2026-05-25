@@ -70,6 +70,8 @@ def register_handlers(client, journal):
                 entry = parser.parse_update(msg, signal_id)
                 if not entry:
                     return
+                # Allow parser to override signal_id (e.g. TV channel uses ticker-based lookup)
+                signal_id = entry.get("signal_id") or signal_id
                 journal.write(channel_id, entry)
                 log.info(
                     f"[{parser.CHANNEL_NAME}] UPDATE {entry['update_type']} "
