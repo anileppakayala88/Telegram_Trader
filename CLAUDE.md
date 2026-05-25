@@ -380,6 +380,8 @@ TELEGRAM_CHANNEL_ID=-1003720726531
 - **XAUUSD BIG LOTS ignores signal's explicit order type:** The signal may say "Buy limit" but the bot resolves the actual MT5 order type from live price vs entry price — identical to Vip Thrilokh. The rationale: the signal's stated type can be stale by the time the bot sees it; live-price comparison is always accurate.
 - **Split range entries:** With `SPLIT_RANGE_ENTRIES=true`, a range signal like `SELL 4583/4590` places two orders — one at each price — paired with TP1 and TP2 respectively. Entry prices are ordered so the price closest to filling first gets TP1.
 - **LLM fallback is cache-backed:** `llm_classify.py` normalizes message text (strip emojis, numbers → `#`) to a stable cache key before checking the API. Repeated variants of the same phrase are free after the first call. Cache lives at `cache/classify_cache.json`.
+- **Never run two bot instances on the same Telegram session:** Two Telethon clients sharing `session_fetch.session` causes Telegram to deliver updates to only one of them unpredictably. The other bot silently stops receiving messages. Always kill the old process before starting a new one. The PID lock (`bot.pid`) prevents this within the same directory but not across directories.
+- **TV signals verified end-to-end (2026-05-25):** TradingView → Vercel → xauusd_bot Telegram channel → Telethon → tv_signals.py → MT5 order_send confirmed working. XAUUSD orders return `retcode=10018` on weekends (market closed) — this is expected, not a bug.
 
 ---
 
