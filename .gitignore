@@ -1,4 +1,5 @@
 .env
+vault.enc
 __pycache__/
 *.pyc
 *.session

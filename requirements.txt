@@ -2,6 +2,8 @@ telethon>=1.36
 python-dotenv>=1.0
 MetaTrader5>=5.0
 anthropic>=0.26  # optional — enables LLM fallback classifier
+cryptography>=42.0.0
+keyring>=25.0.0
 
 # ── Code quality ─────────────────────────────────────────
 ruff>=0.4.0

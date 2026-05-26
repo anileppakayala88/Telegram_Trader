@@ -4,14 +4,20 @@ import os
 import sys
 import time
 from telethon import TelegramClient
-from dotenv import load_dotenv
 from journal import JournalManager
 from listener import register_handlers
 from channels import CHANNEL_PARSERS
 import webhook
 from channels import tv_signals
 
-load_dotenv()
+# Load encrypted credentials (falls back to .env if vault not set up yet)
+try:
+    from vault import load_secrets
+    load_secrets()
+except (RuntimeError, FileNotFoundError):
+    from dotenv import load_dotenv
+    load_dotenv()
+    logging.warning("vault.enc not found — falling back to .env. Run setup_vault.py to encrypt credentials.")
 
 _PID_FILE = os.path.join(os.path.dirname(__file__), "bot.pid")
 
