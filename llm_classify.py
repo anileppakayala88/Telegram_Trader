@@ -103,7 +103,8 @@ def get_update_type(text: str, channel_name: str) -> str:
                 ),
             }],
         )
-        result = resp.content[0].text.strip().lower()
+        block = resp.content[0]
+        result = block.text.strip().lower() if hasattr(block, "text") else "commentary"
         if result not in _VALID_TYPES:
             result = "commentary"
 

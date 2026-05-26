@@ -72,7 +72,6 @@ async def main():
             print(f"  {label.upper()}  ({len(items)})")
             print(f"{'-'*70}")
             for msg_id, ts, text in items:
-                first_line = text.split("\n")[0][:120]
                 full = text.replace("\n", " | ")[:200]
                 print(f"  [{ts}] id={msg_id}  {full}")
             print()

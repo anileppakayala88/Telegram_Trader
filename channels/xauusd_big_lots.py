@@ -45,7 +45,7 @@ def classify(msg) -> str:
         return "noise"
     if _NOISE_RE.match(text):
         return "noise"
-    if any(_SIGNAL_RE.match(l.strip()) for l in text.split("\n")):
+    if any(_SIGNAL_RE.match(line.strip()) for line in text.split("\n")):
         return "new_signal"
     if _ALL_TP_RE.search(text) or _TP_HIT_RE.search(text):
         return "trade_update"
@@ -63,7 +63,7 @@ def classify(msg) -> str:
 
 def parse_signal(msg) -> dict | None:
     text = (msg.text or "").strip()
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
     if not lines:
         return None
 
