@@ -109,8 +109,13 @@ def parse_signal(msg) -> dict | None:
     sl         = float(payload["sl"]) if payload.get("sl") else None
     entry_px   = float(payload.get("price", 0))
     vercel_id  = payload.get("id", f"{ticker}-{msg.id}")
-    signal_id  = str(uuid.uuid4())
 
+    # Deduplicate: TradingView sometimes double-fires the same alert
+    if vercel_id in _tv_open:
+        log.warning(f"TV: duplicate signal ignored — vercel_id={vercel_id} already tracked")
+        return None
+
+    signal_id  = str(uuid.uuid4())
     _tv_open[vercel_id]   = signal_id
     _ticker_to_id[ticker] = vercel_id
     _save_state()
