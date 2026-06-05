@@ -17,7 +17,7 @@ try:
 except (RuntimeError, FileNotFoundError):
     from dotenv import load_dotenv
     load_dotenv()
-    logging.warning("vault.enc not found — falling back to .env. Run setup_vault.py to encrypt credentials.")
+    print("vault.enc not found — falling back to .env. Run setup_vault.py to encrypt credentials.")
 
 _PID_FILE = os.path.join(os.path.dirname(__file__), "bot.pid")
 
